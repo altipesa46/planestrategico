@@ -991,9 +991,9 @@ function openCatPop(x, anchor){
   const ordered = x.level !== "subgrupo";
   const ord = !ordered ? null : isNew ? nextOrd(x.level, M) : catOrd(x.level, M, G);
   const n = isNew ? 0 : rows.filter(r => inScope(r, x)).length;
-  const emptyCat = !isNew && n === 0 && x.level !== "subgrupo";
+  const emptyCat = !isNew && x.level !== "subgrupo" && (n === 0 ? canWrite : isAdmin);
   const title = isNew ? (x.level === "modulo" ? "Nueva línea estratégica" : `Nuevo grupo en ${M}`) : (x.level === "modulo" ? "Línea estratégica" : x.level === "grupo" ? "Grupo" : "Sub-grupo");
-  pop = { x, isNew, M, G, cur, ord };
+  pop = { x, isNew, M, G, cur, ord, n };
   let root = $("#pop-root"); if (!root){ root = document.createElement("div"); root.id = "pop-root"; document.body.appendChild(root); }
   root.innerHTML = `<form class="pop" id="pop" role="dialog" aria-labelledby="pop-t" novalidate>
     <div class="pop-t" id="pop-t">${esc(title)}</div>
@@ -1093,14 +1093,33 @@ async function renameCat(x, M, G, viejo, nuevo){
   if (st.col[oldKey]){ delete st.col[oldKey]; st.col[newKey] = true; }
 }
 async function deletePop(){
-  const { x, M, G } = pop;
+  const { x, M, G, n } = pop, btn = $("#pop-del");
+  const what = x.level === "modulo" ? "la línea estratégica" : "el grupo";
+  const grupos = x.level === "modulo" ? cats.filter(c => c.nivel === "grupo" && c.modulo === M).length : 0;
+  // Primer clic: avisar de lo que se va a borrar. Segundo clic: borrar.
+  if (!btn.dataset.sure){
+    btn.dataset.sure = "1";
+    btn.textContent = "Sí, eliminar";
+    $("#pop-n").innerHTML = `<span class="late">Se eliminará ${what}${grupos ? ` con sus ${grupos} grupos` : ""}${n ? ` y sus <b>${n} ${n === 1 ? "actividad" : "actividades"}</b> (con sus subtareas e historial). No se puede deshacer.` : "."}</span> Pulsa «Sí, eliminar» para confirmar.`;
+    return;
+  }
+  btn.disabled = true;
   try {
+    if (n){
+      let qa = sb.from("acciones").delete().eq("modulo", M);
+      if (!plansMissing) qa = qa.eq("plan_id", curPlan);
+      if (x.level === "grupo") qa = qa.eq("grupo", G);
+      const ra = await qa; if (ra.error) throw ra.error;
+    }
     let q = sb.from("categorias").delete().eq("modulo", M);
     if (!plansMissing) q = q.eq("plan_id", curPlan);
     if (x.level === "grupo") q = q.eq("nivel", "grupo").eq("grupo", G);
     const { error } = await q; if (error) throw error;
-    await loadCats(); refresh(); closePop(); toast("Eliminado");
-  } catch(e){ $("#pop-err").textContent = dbErr(e); }
+    const k = x.level === "modulo" ? "modulo" : "grupo", viejo = x.level === "modulo" ? M : G;
+    st.f[k] = st.f[k].filter(v => v !== viejo); saveUi();
+    await Promise.all([loadAcciones(), loadCats()]); refresh(); closePop();
+    toast(x.level === "modulo" ? "Línea estratégica eliminada" : "Grupo eliminado");
+  } catch(e){ btn.disabled = false; $("#pop-err").textContent = dbErr(e); }
 }
 document.addEventListener("pointerdown", e => { if (pop && !e.target.closest("#pop") && !e.target.closest("[data-ren],[data-newcat],#newline,.poptrig,#u-responsable")) closePop(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && pop){ e.stopImmediatePropagation(); closePop(); } }, true);
