@@ -33,6 +33,7 @@ let rows = [], resps = [], byId = new Map(), respMap = new Map();
 let usuarios = null, usuariosErr = "";
 let cats = [], catsMissing = false, pop = null;
 let allRows = [], allCats = [], planes = [], plansMissing = false, curPlan = null, adminMode = false;
+let areas = [], areasMissing = false;
 let loaded = false, drawer = null, openKey = null, channel = null;
 const store = { get(k,d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } }, set(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} } };
 const blankF = () => ({actividad:[],modulo:[],grupo:[],subgrupo:[],estado:[],resp:[],prio:[],desde:"",hasta:"",fechas:""});
@@ -74,6 +75,22 @@ async function loadCats(){
   if (error){ allCats = []; catsMissing = true; console.warn("categorias:", error.message); derive(); return; }
   allCats = data; catsMissing = false; derive();
 }
+async function loadAreas(){
+  const { data, error } = await sb.from("areas").select("*");
+  if (error){ areas = []; areasMissing = true; return; }
+  areas = data; areasMissing = false;
+}
+/* Nombres de área disponibles (tabla de áreas, o las que ya usan los responsables si aún no existe) */
+function areaNames(){
+  const base = areasMissing ? resps.map(p => p.area) : areas.slice().sort((a,b) => (a.orden ?? 1e6) - (b.orden ?? 1e6) || a.nombre.localeCompare(b.nombre, "es")).map(a => a.nombre);
+  return uniq(base);
+}
+async function ensureArea(nombre){
+  if (!nombre || areasMissing || areas.some(a => a.nombre === nombre)) return;
+  const { error } = await sb.from("areas").insert({ nombre });
+  if (error && !/duplicate|areas_pkey/i.test(error.message)) throw error;
+  await loadAreas();
+}
 async function loadResps(){
   const { data, error } = await sb.from("responsables").select("*");
   if (error) throw error;
@@ -102,6 +119,7 @@ function scheduleReload(what){
     try {
       if (what === "acciones") await loadAcciones();
       else if (what === "responsables") await loadResps();
+      else if (what === "areas") await loadAreas();
       else if (what === "categorias") await loadCats();
       else if (what === "planes"){ await loadPlanes(); if (curPlan && !planOf(curPlan)){ curPlan = null; derive(); } }
       else if (what === "perfiles"){ await refreshMe(); if (st.view === "usuarios") await loadUsuarios(); }
@@ -116,6 +134,7 @@ function subscribe(){
     .on("postgres_changes", { event:"*", schema:"public", table:"responsables" }, () => scheduleReload("responsables"))
     .on("postgres_changes", { event:"*", schema:"public", table:"categorias" }, () => scheduleReload("categorias"))
     .on("postgres_changes", { event:"*", schema:"public", table:"planes" }, () => scheduleReload("planes"))
+    .on("postgres_changes", { event:"*", schema:"public", table:"areas" }, () => scheduleReload("areas"))
     .on("postgres_changes", { event:"*", schema:"public", table:"perfiles" }, () => scheduleReload("perfiles"))
     .subscribe();
 }
@@ -124,6 +143,9 @@ function dbErr(e){
   if (/42501|row-level security|permission/i.test(m)) return "No tienes permiso para hacer este cambio.";
   if (/fechas_ok/.test(m)) return "El cierre objetivo no puede ser anterior al inicio.";
   if (/categorias/.test(m) && /exist|schema cache|relation/i.test(m)) return "Falta crear la tabla de categorías: ejecuta 20261029000000_categorias.sql en el SQL Editor de Supabase.";
+  if (/responsables_area_fk/.test(m)) return "Esa área no existe. Elígela de la lista o créala con «+ Nueva área».";
+  if (/responsables_pkey/.test(m)) return "Ya existe un responsable con ese código.";
+  if (/areas_pkey/.test(m)) return "Ya existe un área con ese nombre.";
   if (/categorias_unica|duplicate key/i.test(m)) return "Ya existe uno con ese nombre.";
   if (/Failed to fetch|NetworkError/i.test(m)) return "Sin conexión. Revisa tu red e inténtalo de nuevo.";
   return "No se pudo guardar: " + (e && e.message || "error desconocido");
@@ -199,7 +221,7 @@ async function enter(){
   if (!me.activo){ await sb.auth.signOut(); showLogin("Tu usuario está desactivado. Habla con un administrador."); return; }
   if (me.cambiar_password){ showChangePassword(true); return; }
   showApp();
-  try { await loadPlanes(); curPlan = null; adminMode = false; await Promise.all([loadAcciones(), loadResps(), loadCats()]); loaded = true; refresh(); subscribe(); }
+  try { await loadPlanes(); curPlan = null; adminMode = false; await Promise.all([loadAcciones(), loadResps(), loadCats(), loadAreas()]); loaded = true; refresh(); subscribe(); }
   catch(e){ $("#view").innerHTML = `<div class="empty"><h2>No se pudieron cargar los datos</h2><p>${esc(e.message || "")}</p></div>`; }
 }
 async function logout(){ if (channel){ sb.removeChannel(channel); channel = null; } await sb.auth.signOut(); me = null; rows = []; allRows = []; allCats = []; planes = []; curPlan = null; resps = []; usuarios = null; loaded = false; closeDrawer(); showLogin(); }
@@ -415,7 +437,7 @@ function renderSummary(){
   if (st.view === "usuarios") msg = usuarios ? `${usuarios.length} usuarios` : "";
   if (!canWrite) msg += (msg?" · ":"") + "Solo lectura";
   $("#fsummary").textContent = msg;
-  const addOk = st.view === "responsables" || st.view === "usuarios" ? isAdmin : canWrite;
+  const addOk = st.view === "usuarios" ? isAdmin : canWrite;
   $("#add").hidden = !addOk || !loaded;
   $("#add").textContent = st.view === "responsables" ? "+ Nuevo responsable" : st.view === "usuarios" ? "+ Nuevo usuario" : "+ Nueva actividad";
   $("#treeacts").hidden = st.view !== "lista";
@@ -574,14 +596,17 @@ function renderResp(){
   const late = c => rows.filter(r => isOverdue(r) && splitResp(r.responsable).includes(c)).length;
   const list = resps.slice().sort((a,b)=>(a.activo===false)-(b.activo===false) || (a.orden??999)-(b.orden??999) || a.id.localeCompare(b.id));
   const orphan = uniq(rows.flatMap(r=>splitResp(r.responsable))).filter(c => !respMap.has(c));
-  let h = `<div class="rhead"><h2>Responsables</h2>${isAdmin?`<button class="btn primary" data-newresp>+ Nuevo responsable</button>`:`<span class="muted" style="font-size:13px">Solo los administradores pueden modificar esta tabla.</span>`}</div>`;
+  let h = `<div class="rhead"><h2>Responsables</h2>${canWrite?`<button class="btn primary" data-newresp>+ Nuevo responsable</button>`:""}</div>`;
+  if (!isAdmin && canWrite) h += `<p class="muted" style="font-size:13px;margin:-4px 0 12px">Puedes dar de alta responsables y áreas. Modificar o eliminar los existentes es cosa de los administradores.</p>`;
+  const an = areaNames();
+  h += `<div class="areas"><span class="lbl">Áreas / departamentos</span>${an.map(a => { const n = resps.filter(p => p.area === a).length; return isAdmin && !areasMissing ? `<button class="achip poptrig" data-area="${esc(a)}" title="Renombrar o eliminar">${esc(a)} <span class="mono">${n}</span></button>` : `<span class="achip">${esc(a)} <span class="mono">${n}</span></span>`; }).join("")}${canWrite && !areasMissing ? `<button class="achip add poptrig" data-newarea>+ Área</button>` : ""}${!an.length ? `<span class="muted" style="font-size:13px">Aún no hay áreas.</span>` : ""}</div>`;
   if (!list.length && !orphan.length) return h + `<div class="note">Aún no hay responsables. Añade a cada persona con un código corto (p. ej. JM) para poder asignarla a actividades.</div>`;
   h += `<div class="tscroll"><table class="rt"><thead><tr><th>Código</th><th>Nombre</th><th class="c-area">Área / departamento</th><th class="c-mail">Email</th><th class="num">Abiertas</th><th class="num c-venc">Vencidas</th><th class="c-est">Estado</th><th></th></tr></thead><tbody>`;
   for (const p of list){
     const o = open(p.id), l = late(p.id);
     h += `<tr data-resp="${esc(p.id)}" class="${p.activo===false?"off":""}" tabindex="0"><td><span class="who">${esc(p.id)}</span></td><td>${esc(p.nombre||"—")}</td><td class="c-area">${esc(p.area||"—")}</td><td class="c-mail">${esc(p.email||"—")}</td><td class="num">${o}</td><td class="num c-venc ${l?"late":""}">${l}</td><td class="c-est">${p.activo===false?"Inactivo":"Activo"}</td><td><button class="btn small" data-seeresp="${esc(p.id)}">Ver actividades</button></td></tr>`;
   }
-  for (const c of orphan) h += `<tr data-orphan="${esc(c)}" tabindex="0"><td><span class="who">${esc(c)}</span></td><td colspan="6" class="muted">Código usado en actividades pero no registrado.${isAdmin?" Pulsa para darlo de alta.":""}</td><td></td></tr>`;
+  for (const c of orphan) h += `<tr data-orphan="${esc(c)}" tabindex="0"><td><span class="who">${esc(c)}</span></td><td colspan="6" class="muted">Código usado en actividades pero no registrado.${canWrite?" Pulsa para darlo de alta.":""}</td><td></td></tr>`;
   return h + `</tbody></table></div>`;
 }
 
@@ -642,7 +667,9 @@ function bindView(){
     const uu = t.closest("[data-user]"); if (uu){ openUser(uu.dataset.user); return; }
     const see = t.closest("[data-seeresp]"); if (see){ e.stopPropagation(); st.f = blankF(); st.f.resp = [see.dataset.seeresp]; st.view = "lista"; st.col = {}; saveUi(); render(); return; }
     const rr = t.closest("[data-resp]"); if (rr){ openResp(rr.dataset.resp); return; }
-    const ro = t.closest("[data-orphan]"); if (ro){ if (isAdmin) openResp(null, ro.dataset.orphan); return; }
+    const ro = t.closest("[data-orphan]"); if (ro){ if (canWrite) openResp(null, ro.dataset.orphan); return; }
+    const na = t.closest("[data-newarea]"); if (na){ openAreaPop(na, null); return; }
+    const ar = t.closest("[data-area]"); if (ar){ openAreaPop(ar, ar.dataset.area); return; }
     const tg = t.closest("[data-tog]");
     if (tg && (t.closest(".chev") || !t.closest("[data-id]"))){ const k = tg.dataset.tog; if (st.col[k]) delete st.col[k]; else st.col[k] = true; saveUi(); renderView(); return; }
     const it = t.closest("[data-id]"); if (it) openDrawer(it.dataset.id);
@@ -654,7 +681,7 @@ function bindView(){
     else if (t.matches("[data-id]")){ e.preventDefault(); openDrawer(t.dataset.id); }
     else if (t.matches("[data-resp]")){ e.preventDefault(); openResp(t.dataset.resp); }
     else if (t.matches("[data-user]")){ e.preventDefault(); openUser(t.dataset.user); }
-    else if (t.matches("[data-orphan]") && isAdmin){ e.preventDefault(); openResp(null, t.dataset.orphan); }
+    else if (t.matches("[data-orphan]") && canWrite){ e.preventDefault(); openResp(null, t.dataset.orphan); }
   });
 }
 
@@ -710,7 +737,7 @@ function renderDrawer(){
       <div class="fld"><label for="d-estado">Estado</label><select id="d-estado" ${dis}>${opt(ESTADOS, d.estado||"Pendiente")}</select></div>
       <div class="fld"><label for="d-prioridad">Prioridad</label><select id="d-prioridad" ${dis}>${opt(PRIOS, d.prioridad, "Sin prioridad")}</select></div>
       <div class="fld full"><span class="lbl">Responsable(s)</span>
-        <div class="chips" id="d-resp">${respCodes.length ? respCodes.map(c=>`<button type="button" class="chip" data-code="${esc(c)}" aria-pressed="${d.sel.includes(c)}" ${dis}><b>${esc(c)}</b>${esc(respMap.get(c)?.nombre||"")}</button>`).join("") : `<span class="muted" style="font-size:13px">No hay responsables registrados.</span>`}</div>
+        <div class="chips" id="d-resp">${respCodes.map(c=>`<button type="button" class="chip" data-code="${esc(c)}" aria-pressed="${d.sel.includes(c)}" ${dis}><b>${esc(c)}</b>${esc(respMap.get(c)?.nombre||"")}</button>`).join("")}${ro ? "" : `<button type="button" class="chip addchip poptrig" id="d-newresp">+ Nuevo responsable</button>`}${!respCodes.length && ro ? `<span class="muted" style="font-size:13px">No hay responsables registrados.</span>` : ""}</div>
       </div>
       <div class="fld"><label for="d-inicio">Fecha de inicio</label><input id="d-inicio" type="date" value="${esc(d.inicio)}" ${dis}></div>
       <div class="fld"><label for="d-fin">Fecha objetivo de cierre</label><input id="d-fin" type="date" value="${esc(d.fin)}" ${dis}></div>
@@ -730,7 +757,8 @@ function renderDrawer(){
   const form = $("#d-form");
   form.addEventListener("input", e => { const k = e.target.id && e.target.id.slice(2); if (!k) return; if (k === "nota") drawer.nota = e.target.value; else drawer.draft[k] = e.target.value; });
   form.addEventListener("change", e => { const k = e.target.id && e.target.id.slice(2); if (k && k !== "nota") drawer.draft[k] = e.target.value; });
-  $("#d-resp").addEventListener("click", e => { const c = e.target.closest(".chip"); if (!c || ro) return; const code = c.dataset.code, s = drawer.draft.sel; drawer.draft.sel = s.includes(code) ? s.filter(x=>x!==code) : s.concat([code]); c.setAttribute("aria-pressed", String(drawer.draft.sel.includes(code))); });
+  const nr = $("#d-newresp"); if (nr) nr.onclick = e => { e.stopPropagation(); openRespPop(nr, code => { if (drawer && drawer.kind === "act"){ drawer.draft.sel = uniq(drawer.draft.sel.concat([code])); renderDrawer(); } }); };
+  $("#d-resp").addEventListener("click", e => { const c = e.target.closest(".chip[data-code]"); if (!c || ro) return; const code = c.dataset.code, s = drawer.draft.sel; drawer.draft.sel = s.includes(code) ? s.filter(x=>x!==code) : s.concat([code]); c.setAttribute("aria-pressed", String(drawer.draft.sel.includes(code))); });
   const asb = $("#d-addsub"); if (asb) asb.onclick = () => newSub(drawer.id);
   form.querySelectorAll("[data-kid]").forEach(b => b.onclick = () => openDrawer(b.dataset.kid));
   const dp = $("#d-parent"); if (dp) dp.onclick = () => openDrawer(d.padre);
@@ -790,9 +818,105 @@ async function removeAct(){
   if (pid && byId.has(pid)) openDrawer(pid);
 }
 
+/* ---------- Selector de área con «+ Nueva área…» ---------- */
+function areaSelect(id, value, dis){
+  const names = areaNames(); if (value && !names.includes(value)) names.push(value);
+  return `<div class="arearow"><select id="${id}" ${dis}><option value="">Sin área</option>${names.map(a => `<option ${a === value ? "selected" : ""}>${esc(a)}</option>`).join("")}${dis ? "" : `<option value="__new">+ Nueva área…</option>`}</select>
+    <input id="${id}-new" placeholder="Nombre del área nueva" maxlength="80" hidden></div>`;
+}
+function bindAreaSelect(id){
+  const sel = $("#"+id), inp = $("#"+id+"-new"); if (!sel) return;
+  sel.addEventListener("change", () => { inp.hidden = sel.value !== "__new"; if (!inp.hidden) inp.focus(); });
+}
+/* Devuelve el área elegida; si es nueva, la crea primero */
+async function readArea(id){
+  const sel = $("#"+id); if (!sel) return null;
+  if (sel.value !== "__new") return sel.value || null;
+  const n = $("#"+id+"-new").value.trim();
+  if (!n) throw new Error("Escribe el nombre del área nueva.");
+  await ensureArea(n); return n;
+}
+
+/* ---------- Ventanita genérica junto a un botón ---------- */
+function showPop(html, anchor){
+  closeMs(); closePop();
+  let root = $("#pop-root"); if (!root){ root = document.createElement("div"); root.id = "pop-root"; document.body.appendChild(root); }
+  root.innerHTML = html;
+  const el = $("#pop"), r = anchor.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
+  const left = Math.min(Math.max(8, r.left - 8), window.innerWidth - w - 8);
+  let top = r.bottom + 6; if (top + h > window.innerHeight - 8 && r.top - h - 6 > 8) top = r.top - h - 6;
+  el.style.left = (left + window.scrollX) + "px"; el.style.top = (top + window.scrollY) + "px";
+  pop = { generic: true };
+  $("#pop-cancel").onclick = closePop;
+  return el;
+}
+
+/* Alta rápida de responsable desde cualquier formulario */
+function openRespPop(anchor, onCreated, onCancel){
+  const el = showPop(`<form class="pop" id="pop" role="dialog" aria-labelledby="pop-t" novalidate>
+    <div class="pop-t" id="pop-t">Nuevo responsable</div>
+    <div class="pop-g rev"><div class="fld"><label for="pr-codigo">Código</label><input id="pr-codigo" maxlength="6" placeholder="EP" autocomplete="off" style="text-transform:uppercase"></div>
+      <div class="fld"><label for="pr-nombre">Nombre</label><input id="pr-nombre" maxlength="80" autocomplete="off"></div></div>
+    <div class="fld"><label for="pr-area">Área / departamento</label>${areaSelect("pr-area", "", "")}</div>
+    <div class="pop-n">El código es lo que se verá en las actividades.</div>
+    <div class="err" id="pop-err"></div>
+    <div class="pop-f"><span class="sp"></span><button type="button" class="btn small" id="pop-cancel">Cancelar</button><button type="submit" class="btn small primary" id="pop-save">Crear</button></div>
+  </form>`, anchor);
+  bindAreaSelect("pr-area");
+  if (onCancel) $("#pop-cancel").onclick = () => { closePop(); onCancel(); };
+  const err = m => { $("#pop-err").textContent = m; };
+  el.addEventListener("submit", async e => {
+    e.preventDefault();
+    const code = $("#pr-codigo").value.trim().toUpperCase(), nombre = $("#pr-nombre").value.trim();
+    if (!/^[A-Z0-9ÑÁÉÍÓÚ]{1,6}$/.test(code)) return err("Código: de 1 a 6 letras o números, sin espacios.");
+    if (respMap.has(code)) return err(`Ya existe el código ${code}.`);
+    if (!nombre) return err("Escribe el nombre.");
+    const btn = $("#pop-save"); btn.disabled = true;
+    try {
+      const area = await readArea("pr-area");
+      const { error } = await sb.from("responsables").insert({ codigo: code, nombre, area, email: "", activo: true, orden: resps.reduce((m,p)=>Math.max(m,p.orden||0),0)+1 });
+      if (error) throw error;
+      await loadResps(); closePop(); toast(`Responsable ${code} añadido`);
+      onCreated(code);
+    } catch(e){ btn.disabled = false; err(e.message && !e.code ? e.message : dbErr(e)); }
+  });
+  $("#pr-codigo").focus();
+}
+
+/* Crear / renombrar / eliminar un área */
+function openAreaPop(anchor, nombre){
+  const isNew = !nombre, nResp = isNew ? 0 : resps.filter(p => p.area === nombre).length;
+  const el = showPop(`<form class="pop" id="pop" role="dialog" aria-labelledby="pop-t" novalidate>
+    <div class="pop-t" id="pop-t">${isNew ? "Nueva área" : "Área"}</div>
+    <div class="fld"><label for="pa-nombre">Nombre</label><input id="pa-nombre" value="${esc(nombre || "")}" maxlength="80" autocomplete="off"></div>
+    ${isNew ? "" : `<div class="pop-n">${nResp} ${nResp === 1 ? "responsable" : "responsables"}. Al renombrarla se actualizan solos.</div>`}
+    <div class="err" id="pop-err"></div>
+    <div class="pop-f">${!isNew && isAdmin ? `<button type="button" class="btn link dangertxt" id="pop-del">Eliminar</button>` : ""}<span class="sp"></span><button type="button" class="btn small" id="pop-cancel">Cancelar</button><button type="submit" class="btn small primary" id="pop-save">${isNew ? "Crear" : "Guardar"}</button></div>
+  </form>`, anchor);
+  const err = m => { $("#pop-err").textContent = m; };
+  el.addEventListener("submit", async e => {
+    e.preventDefault();
+    const n = $("#pa-nombre").value.trim(); if (!n) return err("Escribe un nombre.");
+    if (n === nombre){ closePop(); return; }
+    if (areaNames().includes(n)) return err("Ya existe un área con ese nombre.");
+    try {
+      if (isNew){ const r = await sb.from("areas").insert({ nombre: n }); if (r.error) throw r.error; }
+      else { const r = await sb.from("areas").update({ nombre: n }).eq("nombre", nombre).select("nombre"); if (r.error) throw r.error; if (!r.data || !r.data.length) throw { message: "permission" }; }
+      await Promise.all([loadAreas(), loadResps()]); closePop(); renderView(); toast(isNew ? "Área creada" : "Área renombrada");
+    } catch(e){ err(dbErr(e)); }
+  });
+  const del = $("#pop-del"); if (del) del.onclick = async () => {
+    if (!del.dataset.sure){ del.dataset.sure = "1"; del.textContent = nResp ? `¿Eliminar? ${nResp} quedarán sin área` : "¿Seguro? Pulsa otra vez"; return; }
+    const r = await sb.from("areas").delete().eq("nombre", nombre);
+    if (r.error) return err(dbErr(r.error));
+    await Promise.all([loadAreas(), loadResps()]); closePop(); renderView(); toast("Área eliminada");
+  };
+  $("#pa-nombre").focus(); $("#pa-nombre").select();
+}
+
 /* ---------- Ficha de responsable ---------- */
 function renderRespDrawer(){
-  const d = drawer.draft, ro = !isAdmin, dis = ro ? "disabled" : "", isNew = !drawer.id;
+  const d = drawer.draft, isNew = !drawer.id, ro = isNew ? !canWrite : !isAdmin, dis = ro ? "disabled" : "";
   const used = drawer.id ? rows.filter(r => splitResp(r.responsable).includes(drawer.id)).length : 0;
   $("#drawer-root").innerHTML = `<div class="scrim" id="scrim"></div>
   <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title">
@@ -800,11 +924,10 @@ function renderRespDrawer(){
     <form class="dbody" id="d-form">
       <div class="fld"><label for="r-codigo">Código</label><input id="r-codigo" value="${esc(d.id)}" maxlength="6" placeholder="p. ej. JM" ${isNew&&!ro?"":"disabled"} style="text-transform:uppercase"></div>
       <div class="fld"><label for="r-nombre">Nombre</label><input id="r-nombre" value="${esc(d.nombre)}" ${dis}></div>
-      <div class="fld full"><label for="r-area">Área / departamento</label><input id="r-area" value="${esc(d.area)}" list="dl-area" ${dis}></div>
+      <div class="fld full"><label for="r-area">Área / departamento</label>${areaSelect("r-area", d.area || "", dis)}</div>
       <div class="fld full"><label for="r-email">Email</label><input id="r-email" type="email" value="${esc(d.email)}" ${dis}></div>
       <label class="check full"><input id="r-activo" type="checkbox" ${d.activo!==false?"checked":""} ${dis}> Activo (aparece al asignar actividades)</label>
-      ${isNew ? `<p class="muted full" style="font-size:13px;margin:0">El código es lo que se muestra en las actividades. No se puede cambiar después.</p>` : `<p class="muted full" style="font-size:13px;margin:0">Asignado en ${used} actividades o subtareas.</p>`}
-      <datalist id="dl-area">${uniq(resps.map(p=>p.area)).map(a=>`<option value="${esc(a)}"></option>`).join("")}</datalist>
+      ${isNew ? `<p class="muted full" style="font-size:13px;margin:0">El código es lo que se muestra en las actividades. No se puede cambiar después.</p>` : `<p class="muted full" style="font-size:13px;margin:0">Asignado en ${used} actividades o subtareas.${ro ? " Solo un administrador puede modificarlo." : ""}</p>`}
     </form>
     <div class="dfoot">
       <div>${!isNew && !ro ? (used ? `<span class="muted" style="font-size:13px">Para retirarlo, desmarca «Activo».</span>` : drawer.confirmDel ? `<span class="err">¿Eliminar?</span> <button class="btn danger" id="d-del-yes">Sí, eliminar</button> <button class="btn" id="d-del-no">No</button>` : `<button class="btn danger" id="d-del">Eliminar</button>`) : ""}</div>
@@ -812,8 +935,9 @@ function renderRespDrawer(){
     </div>
   </aside>`;
   bindDrawerCommon();
-  $("#d-form").addEventListener("input", e => { const k = e.target.id.slice(2); if (k === "codigo") d.id = e.target.value; else if (k === "activo") d.activo = e.target.checked; else d[k] = e.target.value; });
+  $("#d-form").addEventListener("input", e => { if (e.target.id.startsWith("r-area")) return; const k = e.target.id.slice(2); if (k === "codigo") d.id = e.target.value; else if (k === "activo") d.activo = e.target.checked; else d[k] = e.target.value; });
   $("#r-activo").addEventListener("change", e => d.activo = e.target.checked);
+  bindAreaSelect("r-area");
   const s = $("#d-save"); if (s) s.onclick = saveResp;
   const dy = $("#d-del-yes"); if (dy) dy.onclick = async () => {
     const { error } = await sb.from("responsables").delete().eq("codigo", drawer.id);
@@ -827,9 +951,12 @@ async function saveResp(){
   if (!drawer.id && respMap.has(code)){ drawer.error = `Ya existe el código ${code}.`; renderDrawer(); return; }
   if (!String(d.nombre||"").trim()){ drawer.error = "Escribe el nombre."; renderDrawer(); return; }
   const prev = respMap.get(code);
-  const body = { codigo: code, nombre: String(d.nombre).trim(), area: String(d.area||"").trim(), email: String(d.email||"").trim(), activo: d.activo !== false, orden: prev?.orden ?? (resps.reduce((m,p)=>Math.max(m,p.orden||0),0)+1), actualizado: new Date().toISOString() };
+  let area;
+  try { area = await readArea("r-area"); } catch(e){ drawer.error = e.message && !e.code ? e.message : dbErr(e); renderDrawer(); return; }
+  d.area = area || "";
+  const body = { codigo: code, nombre: String(d.nombre).trim(), area, email: String(d.email||"").trim(), activo: d.activo !== false, orden: prev?.orden ?? (resps.reduce((m,p)=>Math.max(m,p.orden||0),0)+1), actualizado: new Date().toISOString() };
   busy(true);
-  const { error } = await sb.from("responsables").upsert(body, { onConflict: "codigo" });
+  const { error } = prev ? await sb.from("responsables").update(body).eq("codigo", code) : await sb.from("responsables").insert(body);
   if (error){ drawer.error = dbErr(error); renderDrawer(); return; }
   await loadResps(); refresh(); closeDrawer(); toast(prev ? "Responsable actualizado" : "Responsable añadido");
 }
@@ -975,7 +1102,7 @@ async function deletePop(){
     await loadCats(); refresh(); closePop(); toast("Eliminado");
   } catch(e){ $("#pop-err").textContent = dbErr(e); }
 }
-document.addEventListener("pointerdown", e => { if (pop && !e.target.closest("#pop") && !e.target.closest("[data-ren],[data-newcat],#newline")) closePop(); });
+document.addEventListener("pointerdown", e => { if (pop && !e.target.closest("#pop") && !e.target.closest("[data-ren],[data-newcat],#newline,.poptrig,#u-responsable")) closePop(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && pop){ e.stopImmediatePropagation(); closePop(); } }, true);
 
 /* ---------- Ficha de usuario (administradores) ---------- */
@@ -985,7 +1112,7 @@ function genPassword(){
 }
 function renderUserDrawer(){
   const d = drawer.draft, isNew = !drawer.id, self = !isNew && drawer.id === me.id;
-  const respOpts = `<option value="">Sin vincular</option>` + resps.slice().sort((a,b)=>a.id.localeCompare(b.id)).map(p => `<option value="${esc(p.id)}" ${p.id===d.responsable?"selected":""}>${esc(p.id)} · ${esc(p.nombre||"")}</option>`).join("");
+  const respOpts = `<option value="">Sin vincular</option>` + resps.slice().sort((a,b)=>a.id.localeCompare(b.id)).map(p => `<option value="${esc(p.id)}" ${p.id===d.responsable?"selected":""}>${esc(p.id)} · ${esc(p.nombre||"")}</option>`).join("") + `<option value="__new">+ Nuevo responsable…</option>`;
   $("#drawer-root").innerHTML = `<div class="scrim" id="scrim"></div>
   <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title">
     <div class="dhead"><h2 id="d-title">${isNew ? "Nuevo usuario" : "Usuario " + esc(d.usuario)}</h2><button class="btn" id="d-close" aria-label="Cerrar">✕</button></div>
@@ -1007,8 +1134,15 @@ function renderUserDrawer(){
     </div>
   </aside>`;
   bindDrawerCommon();
-  $("#d-form").addEventListener("input", e => { const k = e.target.id.slice(2); if (k === "activo") d.activo = e.target.checked; else d[k] = e.target.value; });
-  $("#d-form").addEventListener("change", e => { const k = e.target.id.slice(2); if (k === "activo") d.activo = e.target.checked; else d[k] = e.target.value; });
+  const keep = e => !(e.target.id === "u-responsable" && e.target.value === "__new");
+  $("#d-form").addEventListener("input", e => { if (!keep(e)) return; const k = e.target.id.slice(2); if (k === "activo") d.activo = e.target.checked; else d[k] = e.target.value; });
+  $("#d-form").addEventListener("change", e => { if (!keep(e)) return; const k = e.target.id.slice(2); if (k === "activo") d.activo = e.target.checked; else d[k] = e.target.value; });
+  const us = $("#u-responsable");
+  us.addEventListener("change", () => {
+    if (us.value !== "__new") return;
+    const prevVal = d.responsable || "";
+    openRespPop(us, code => { d.responsable = code; renderDrawer(); }, () => { us.value = prevVal; d.responsable = prevVal; });
+  });
   $("#u-gen").onclick = () => { d.password = genPassword(); $("#u-password").value = d.password; };
   $("#d-save").onclick = saveUser;
   const dy = $("#d-del-yes"); if (dy) dy.onclick = async () => {

@@ -157,6 +157,17 @@ header.top.hero::after{content:"";position:absolute;top:0;bottom:0;right:max(16p
 .pop-f{display:flex;align-items:center;gap:6px}
 .pop-f .sp{flex:1}
 .dangertxt{color:var(--danger)!important}
+.arearow{display:flex;flex-direction:column;gap:6px}
+.pop-g.rev{grid-template-columns:80px minmax(0,1fr)}
+.pop select{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:6px 8px;width:100%}
+.addchip{border-style:dashed;color:var(--accent);font-weight:600;background:transparent}
+.areas{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin:0 0 14px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
+.areas .lbl{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-right:4px}
+.achip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--surface-2);border-radius:999px;padding:3px 10px;font-size:13px;color:var(--fg)}
+button.achip{cursor:pointer}
+button.achip:hover{border-color:var(--accent)}
+.achip .mono{font-size:11px;color:var(--muted)}
+.achip.add{background:transparent;border-style:dashed;color:var(--accent);font-weight:600}
 @media (max-width:760px){.emptyrow{padding-left:40px}}
 .ren{border:0;background:none;padding:2px;border-radius:4px;cursor:pointer;color:var(--muted);display:inline-grid;place-items:center;opacity:0}
 .lv:hover .ren,.sh:hover .ren,.ren:focus-visible{opacity:1}
@@ -217,14 +228,14 @@ main .wrap{padding-block:18px 60px}
 .minibar i{display:block;height:100%;background:var(--st-ok)}
 /* fila de sub-grupo = cabecera de columnas */
 .tr,.sh{display:grid;grid-template-columns:var(--cols);gap:12px;align-items:center;padding:8px 14px;border-top:1px solid var(--line)}
-.sh{padding-left:54px;background:color-mix(in srgb,var(--surface-2) 50%,var(--surface));cursor:pointer}
-.sh .shn{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;margin-left:-28px}
+.sh{padding-left:64px;background:color-mix(in srgb,var(--surface-2) 50%,var(--surface));cursor:pointer}
+.sh .shn{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;margin-left:0}
 .sh .shn b{font-size:13px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
 .sh .shs{flex-basis:100%;padding-left:30px;font-size:12px;color:var(--muted)}
 .sh .hc{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;white-space:nowrap}
 .tr{cursor:pointer}
 .tr:hover{background:color-mix(in srgb,var(--accent) 5%,var(--surface))}
-.tr .act{display:flex;align-items:flex-start;gap:4px;min-width:0;padding-left:calc(var(--ind,0) * 22px + 40px)}
+.tr .act{display:flex;align-items:flex-start;gap:4px;min-width:0;padding-left:calc(var(--ind,0) * 22px + 80px)}
 .tr .act .txt{min-width:0;padding-top:2px}
 .tr .act .meta{font-size:12px;color:var(--muted)}
 .tr.ctx .act .txt>span:first-child{color:var(--muted)}
@@ -236,7 +247,7 @@ main .wrap{padding-block:18px 60px}
 .kc{font-size:11px;color:var(--muted);font-family:var(--f-mono);white-space:nowrap}
 .d{font-size:13px}
 .d small{display:block;font-size:11px;color:var(--muted);font-family:var(--f-body)}
-@media (max-width:1000px){.tr,.sh{gap:8px;padding-right:10px}.tr .act{padding-left:calc(var(--ind,0) * 16px + 36px)}}
+@media (max-width:1000px){.tr,.sh{gap:8px;padding-right:10px}.tr .act{padding-left:calc(var(--ind,0) * 18px + 80px)}}
 @media (max-width:900px){.rt .c-area,.rt .c-mail{display:none}}
 @media (max-width:640px){
   .rt .c-venc,.rt .c-est{display:none}
@@ -252,9 +263,9 @@ main .wrap{padding-block:18px 60px}
 }
 @media (max-width:760px){
   .sh .hc{display:none}
-  .sh{grid-template-columns:1fr;padding-left:40px}
+  .sh{grid-template-columns:1fr;padding-left:54px}
   .tr{grid-template-columns:1fr auto;grid-template-areas:"act act" "who st" "d1 d2"}
-  .tr .act{grid-area:act;padding-left:calc(var(--ind,0) * 14px + 12px)}.tr .c-who{grid-area:who}.tr .c-st{grid-area:st}.tr .c-pr{display:none}.tr .c-d1{grid-area:d1}.tr .c-d2{grid-area:d2;text-align:right}
+  .tr .act{grid-area:act;padding-left:calc(var(--ind,0) * 14px + 44px)}.tr .c-who{grid-area:who}.tr .c-st{grid-area:st}.tr .c-pr{display:none}.tr .c-d1{grid-area:d1}.tr .c-d2{grid-area:d2;text-align:right}
   .lv1{padding-left:24px}
   .sts{margin-left:30px}
 }
@@ -424,7 +435,7 @@ header.top .wrap{display:flex;flex-wrap:wrap;gap:10px 20px;align-items:flex-end;
 <div id="drawer-root"></div>
 <div class="toast" id="toast" hidden></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="supabase.js"></script>
 <script src="config.js"></script>
 <script src="app.js"></script>
 </body>
