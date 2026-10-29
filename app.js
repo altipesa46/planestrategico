@@ -31,6 +31,8 @@ const newId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toStri
 let sb = null, me = null, isAdmin = false, canWrite = false;
 let rows = [], resps = [], byId = new Map(), respMap = new Map();
 let usuarios = null, usuariosErr = "";
+let cats = [], catsMissing = false, pop = null;
+let allRows = [], allCats = [], planes = [], plansMissing = false, curPlan = null, adminMode = false;
 let loaded = false, drawer = null, openKey = null, channel = null;
 const store = { get(k,d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } }, set(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} } };
 const blankF = () => ({actividad:[],modulo:[],grupo:[],subgrupo:[],estado:[],resp:[],prio:[],desde:"",hasta:"",fechas:""});
@@ -46,12 +48,31 @@ const fromDb = r => ({
   id: r.id, padre: r.padre || "", modulo: r.modulo || "", grupo: r.grupo || "", subgrupo: r.subgrupo || "",
   actividad: r.actividad || "", estado: r.estado || "Pendiente", responsable: r.responsable || "", prioridad: r.prioridad || "",
   inicio: r.inicio || "", fin: r.fin || "", notas: r.notas || "", orden: r.orden, historial: Array.isArray(r.historial) ? r.historial : [],
-  creado: r.creado, actualizado: r.actualizado
+  creado: r.creado, actualizado: r.actualizado, plan_id: r.plan_id || null
 });
 async function loadAcciones(){
   const { data, error } = await sb.from("acciones").select("*");
   if (error) throw error;
-  rows = data.map(fromDb); byId = new Map(rows.map(r => [r.id, r]));
+  allRows = data.map(fromDb); derive();
+}
+/* Lo que se ve en pantalla es solo el plan abierto */
+function derive(){
+  rows = plansMissing ? allRows : curPlan ? allRows.filter(r => r.plan_id === curPlan) : [];
+  byId = new Map(rows.map(r => [r.id, r]));
+  cats = plansMissing ? allCats : curPlan ? allCats.filter(c => c.plan_id === curPlan) : [];
+}
+async function loadPlanes(){
+  const { data, error } = await sb.from("planes").select("*");
+  if (error){ planes = []; plansMissing = true; console.warn("planes:", error.message); return; }
+  planes = data; plansMissing = false;
+}
+const withPlan = o => plansMissing ? o : Object.assign({ plan_id: curPlan }, o);
+const CONFLICT = () => plansMissing ? "nivel,modulo,grupo" : "plan_id,nivel,modulo,grupo";
+const planOf = id => planes.find(p => p.id === id);
+async function loadCats(){
+  const { data, error } = await sb.from("categorias").select("*");
+  if (error){ allCats = []; catsMissing = true; console.warn("categorias:", error.message); derive(); return; }
+  allCats = data; catsMissing = false; derive();
 }
 async function loadResps(){
   const { data, error } = await sb.from("responsables").select("*");
@@ -81,6 +102,8 @@ function scheduleReload(what){
     try {
       if (what === "acciones") await loadAcciones();
       else if (what === "responsables") await loadResps();
+      else if (what === "categorias") await loadCats();
+      else if (what === "planes"){ await loadPlanes(); if (curPlan && !planOf(curPlan)){ curPlan = null; derive(); } }
       else if (what === "perfiles"){ await refreshMe(); if (st.view === "usuarios") await loadUsuarios(); }
       refresh();
     } catch(e){ console.error(e); }
@@ -91,6 +114,8 @@ function subscribe(){
   channel = sb.channel("pe-cambios")
     .on("postgres_changes", { event:"*", schema:"public", table:"acciones" }, () => scheduleReload("acciones"))
     .on("postgres_changes", { event:"*", schema:"public", table:"responsables" }, () => scheduleReload("responsables"))
+    .on("postgres_changes", { event:"*", schema:"public", table:"categorias" }, () => scheduleReload("categorias"))
+    .on("postgres_changes", { event:"*", schema:"public", table:"planes" }, () => scheduleReload("planes"))
     .on("postgres_changes", { event:"*", schema:"public", table:"perfiles" }, () => scheduleReload("perfiles"))
     .subscribe();
 }
@@ -98,6 +123,8 @@ function dbErr(e){
   const m = (e && (e.message || "")) + " " + (e && e.code || "");
   if (/42501|row-level security|permission/i.test(m)) return "No tienes permiso para hacer este cambio.";
   if (/fechas_ok/.test(m)) return "El cierre objetivo no puede ser anterior al inicio.";
+  if (/categorias/.test(m) && /exist|schema cache|relation/i.test(m)) return "Falta crear la tabla de categorías: ejecuta 20261029000000_categorias.sql en el SQL Editor de Supabase.";
+  if (/categorias_unica|duplicate key/i.test(m)) return "Ya existe uno con ese nombre.";
   if (/Failed to fetch|NetworkError/i.test(m)) return "Sin conexión. Revisa tu red e inténtalo de nuevo.";
   return "No se pudo guardar: " + (e && e.message || "error desconocido");
 }
@@ -172,10 +199,10 @@ async function enter(){
   if (!me.activo){ await sb.auth.signOut(); showLogin("Tu usuario está desactivado. Habla con un administrador."); return; }
   if (me.cambiar_password){ showChangePassword(true); return; }
   showApp();
-  try { await Promise.all([loadAcciones(), loadResps()]); loaded = true; refresh(); subscribe(); }
+  try { await loadPlanes(); curPlan = null; adminMode = false; await Promise.all([loadAcciones(), loadResps(), loadCats()]); loaded = true; refresh(); subscribe(); }
   catch(e){ $("#view").innerHTML = `<div class="empty"><h2>No se pudieron cargar los datos</h2><p>${esc(e.message || "")}</p></div>`; }
 }
-async function logout(){ if (channel){ sb.removeChannel(channel); channel = null; } await sb.auth.signOut(); me = null; rows = []; resps = []; usuarios = null; loaded = false; closeDrawer(); showLogin(); }
+async function logout(){ if (channel){ sb.removeChannel(channel); channel = null; } await sb.auth.signOut(); me = null; rows = []; allRows = []; allCats = []; planes = []; curPlan = null; resps = []; usuarios = null; loaded = false; closeDrawer(); showLogin(); }
 function showApp(){
   $("#gate").hidden = true; $("#app").hidden = false;
   $("#me").innerHTML = me ? `<span><b>${esc(me.nombre || me.usuario)}</b> · ${esc(me.usuario)}</span><span class="role">${me.rol === "admin" ? "Administrador" : "Usuario"}</span>
@@ -232,16 +259,32 @@ function visibleTops(){
   }
   return out;
 }
-function groupTree(entries){
-  const tree = new Map();
+/* Orden de visualización de líneas estratégicas (módulos) y grupos */
+const catRow = (level, m, g) => cats.find(c => c.nivel === level && c.modulo === m && (level === "modulo" || c.grupo === g));
+const catOrd = (level, m, g) => { const c = catRow(level, m, g); return c && c.orden != null ? c.orden : null; };
+function nextOrd(level, m){
+  const os = cats.filter(c => c.nivel === level && (level === "modulo" || c.modulo === m)).map(c => c.orden || 0);
+  return (os.length ? Math.max(...os) : 0) + 1;
+}
+const noFilters = () => MSKEYS.every(k => !st.f[k].length) && !st.f.desde && !st.f.hasta && !st.f.fechas;
+function groupTree(entries, withEmpty){
+  const tree = new Map(), first = new Map(); let i = 0;
+  const add = (m, g) => {
+    if (!tree.has(m)){ tree.set(m, new Map()); first.set("m:"+m, i++); }
+    if (g != null){ const gm = tree.get(m); if (!gm.has(g)){ gm.set(g, new Map()); first.set("g:"+m+"|"+g, i++); } }
+  };
   for (const en of entries){
     const r = en.r, m = r.modulo || "Sin módulo", g = r.grupo || "Sin grupo", s = r.subgrupo || "Sin sub-grupo";
-    if (!tree.has(m)) tree.set(m, new Map());
-    const gm = tree.get(m); if (!gm.has(g)) gm.set(g, new Map());
-    const sm = gm.get(g); if (!sm.has(s)) sm.set(s, []);
+    add(m, g);
+    const sm = tree.get(m).get(g); if (!sm.has(s)) sm.set(s, []);
     sm.get(s).push(en);
   }
-  return tree;
+  if (withEmpty) for (const c of cats){ if (c.nivel === "modulo") add(c.modulo, null); else add(c.modulo, c.grupo); }
+  const key = (o, f) => o != null ? o : 1e6 + (f || 0);
+  const mk = m => key(catOrd("modulo", m), first.get("m:"+m));
+  const gk = (m, g) => key(catOrd("grupo", m, g), first.get("g:"+m+"|"+g));
+  return new Map([...tree.entries()].sort((a,b) => mk(a[0]) - mk(b[0]))
+    .map(([m, gm]) => [m, new Map([...gm.entries()].sort((a,b) => gk(m,a[0]) - gk(m,b[0])))]));
 }
 
 /* ---------- filtros multi-selección ---------- */
@@ -252,6 +295,11 @@ function optionsFor(key){
   if (UPS[key]){
     const src = sorted(rows.filter(isTop)).filter(r => UPS[key].every(u => !st.f[u].length || st.f[u].includes(valueOf(r,u))));
     vals = uniq(src.map(r => valueOf(r,key)));
+    if (key === "modulo" || key === "grupo"){
+      const t = groupTree(src.map(r => ({ r })), false);
+      const ordered = key === "modulo" ? [...t.keys()] : uniq([...t.values()].flatMap(gm => [...gm.keys()]));
+      vals = ordered.filter(v => vals.includes(v)).concat(vals.filter(v => !ordered.includes(v)));
+    }
     if (key === "actividad") for (const r of src){ const h = r.subgrupo || ""; hints[r.actividad] = hints[r.actividad] && hints[r.actividad] !== h ? "Varios sub-grupos" : h; }
   }
   else if (key === "estado") vals = ESTADOS;
@@ -351,8 +399,13 @@ function bindStatic(){
     if (st.view === "usuarios"){ await loadUsuarios(); renderView(); }
   }));
   $("#add").addEventListener("click", () => st.view === "responsables" ? openResp(null) : st.view === "usuarios" ? openUser(null) : openDrawer(null, {}));
-  $("#expand").addEventListener("click", () => { st.col = {}; saveUi(); renderView(); });
-  $("#collapse").addEventListener("click", () => { st.col = {}; for (const r of rows) if (isTop(r)) st.col["m:"+(r.modulo||"Sin módulo")] = true; saveUi(); renderView(); });
+  $("#togall").addEventListener("click", () => {
+    if (Object.keys(st.col).length) st.col = {};
+    else { st.col = {}; for (const m of groupTree(visibleTops(), noFilters()).keys()) st.col["m:"+m] = true; }
+    saveUi(); renderView();
+  });
+  $("#newline").addEventListener("click", e => openCatPop({ mode:"new", level:"modulo" }, e.currentTarget));
+  $("#back").addEventListener("click", goHome);
   document.addEventListener("keydown", e => { if (e.key !== "Escape") return; if (openKey){ closeMs(); return; } if (drawer) closeDrawer(); });
 }
 function renderSummary(){
@@ -366,8 +419,16 @@ function renderSummary(){
   $("#add").hidden = !addOk || !loaded;
   $("#add").textContent = st.view === "responsables" ? "+ Nuevo responsable" : st.view === "usuarios" ? "+ Nuevo usuario" : "+ Nueva actividad";
   $("#treeacts").hidden = st.view !== "lista";
+  $("#newline").hidden = !canWrite;
   const noFilters = ["responsables","usuarios"].includes(st.view);
   $("#filters").style.opacity = noFilters ? ".45" : "";
+  const inPlan = !!curPlan || plansMissing, home = loaded && !plansMissing && !curPlan && !adminMode;
+  $(".bar").hidden = home;
+  for (const id of ["tab-lista","tab-cal","tab-gantt"]) $("#"+id).hidden = !inPlan;
+  for (const id of ["ftoggle","mine","clear"]) if (!inPlan) $("#"+id).hidden = true;
+  if (inPlan) $("#mine").hidden = !(me && me.responsable);
+  if (inPlan){ $("#ftoggle").hidden = false; $("#clear").hidden = false; }
+  if (!inPlan){ $("#filters").classList.add("collapsed"); $("#treeacts").hidden = true; }
 }
 
 /* ---------- Lista (árbol) ---------- */
@@ -388,7 +449,8 @@ function dueHtml(r){
   return `<span class="mono ${isOverdue(r)?"late":""}">${fmt(r.fin)}</span>${sub}`;
 }
 const LVNAME = { modulo:"módulo", grupo:"grupo", subgrupo:"sub-grupo" };
-const renBtn = (level, m, g, s) => canWrite ? `<button class="ren" data-ren='${esc(JSON.stringify({level,m,g,s}))}' title="Cambiar nombre" aria-label="Cambiar nombre del ${LVNAME[level]} ${esc(level==="modulo"?m:level==="grupo"?g:s)}"><svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M11.3 2.3a1.5 1.5 0 0 1 2.1 2.1L5.6 12.2 2.5 13l.8-3.1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>` : "";
+const renBtn = (level, m, g, s) => canWrite ? `<button class="ren" data-ren='${esc(JSON.stringify({level,m,g,s}))}' title="${level === "subgrupo" ? "Cambiar nombre" : "Cambiar nombre u orden"}" aria-label="Editar ${LVNAME[level]} ${LVNAME[level]} ${esc(level==="modulo"?m:level==="grupo"?g:s)}"><svg width="11" height="11" viewBox="0 0 16 16" aria-hidden="true"><path d="M11.3 2.3a1.5 1.5 0 0 1 2.1 2.1L5.6 12.2 2.5 13l.8-3.1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>` : "";
+const addLv = (label, attr, json) => canWrite ? `<button class="addlv" ${attr}='${esc(JSON.stringify(json))}'>${label}</button>` : "";
 const chevBtn = key => `<button class="chev" data-tog="${esc(key)}" aria-expanded="${!st.col[key]}" aria-label="${st.col[key]?"Desplegar":"Plegar"}">${CHEV}</button>`;
 function rowHtml(r, ind, o){
   o = o || {};
@@ -403,17 +465,19 @@ function rowHtml(r, ind, o){
   </div>`;
 }
 function renderLista(){
-  const vis = visibleTops();
-  if (!vis.length) return emptyFiltered();
+  const vis = visibleTops(), withEmpty = noFilters();
+  if (!vis.length && !(withEmpty && cats.length)) return emptyFiltered();
   let h = `<div class="tree">`;
-  for (const [m, gm] of groupTree(vis)){
+  for (const [m, gm] of groupTree(vis, withEmpty)){
     const km = "m:"+m, mAll = [...gm.values()].flatMap(sm => [...sm.values()].flat());
-    h += `<div class="lv lv0" data-tog="${esc(km)}"><span class="nm">${chevBtn(km)}<b>${esc(m)}</b>${renBtn("modulo",m,"" ,"")}</span><span class="sts">${statsHtml(mAll)}</span></div>`;
+    h += `<div class="lv lv0" data-tog="${esc(km)}"><span class="nm">${chevBtn(km)}<b>${esc(m)}</b>${renBtn("modulo",m,"","")}${addLv("+ Grupo","data-newcat",{level:"grupo",m})}</span><span class="sts">${mAll.length ? statsHtml(mAll) : "Sin actividades todavía"}</span></div>`;
     if (st.col[km]) continue;
+    if (!gm.size) h += `<div class="emptyrow">Esta línea estratégica aún no tiene grupos.${addLv("+ Añadir grupo","data-newcat",{level:"grupo",m})}</div>`;
     for (const [g, sm] of gm){
       const kg = "g:"+m+"|"+g, gAll = [...sm.values()].flat();
-      h += `<div class="lv lv1" data-tog="${esc(kg)}"><span class="nm">${chevBtn(kg)}<b>${esc(g)}</b>${renBtn("grupo",m,g,"")}</span><span class="sts">${statsHtml(gAll)}</span></div>`;
+      h += `<div class="lv lv1" data-tog="${esc(kg)}"><span class="nm">${chevBtn(kg)}<b>${esc(g)}</b>${renBtn("grupo",m,g,"")}${addLv("+ Actividad","data-add",{modulo:m,grupo:g,subgrupo:""})}</span><span class="sts">${gAll.length ? statsHtml(gAll) : "Sin actividades todavía"}</span></div>`;
       if (st.col[kg]) continue;
+      if (!sm.size) h += `<div class="emptyrow">Este grupo aún no tiene actividades.${addLv("+ Añadir actividad","data-add",{modulo:m,grupo:g,subgrupo:""})}</div>`;
       for (const [s, items] of sm){
         const ks = "s:"+m+"|"+g+"|"+s, closed = !!st.col[ks];
         h += `<div class="sh" data-tog="${esc(ks)}">
@@ -545,11 +609,14 @@ function renderUsers(){
 function emptyFiltered(){ return `<div class="empty"><h2>Ninguna actividad coincide</h2><p>Cambia o limpia los filtros para ver más resultados.</p></div>`; }
 function renderView(){
   const v = $("#view");
+  renderHeader();
+  if (loaded && !plansMissing && !curPlan && !adminMode){ v.innerHTML = renderHome(); return; }
   document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.view === st.view)));
   if (!loaded){ v.innerHTML = `<div class="empty"><h2>Cargando actividades…</h2><p>Las acciones del plan estratégico aparecerán aquí agrupadas por módulo, grupo y sub-grupo.</p></div>`; return; }
   if (st.view === "responsables"){ v.innerHTML = renderResp(); return; }
   if (st.view === "usuarios"){ v.innerHTML = renderUsers(); return; }
-  if (!rows.length){ v.innerHTML = `<div class="empty"><h2>Aún no hay actividades</h2><p>Pulsa «+ Nueva actividad» para registrar la primera acción del plan, con su responsable y fechas.</p></div>`; return; }
+  if (!curPlan && !plansMissing){ st.view = "responsables"; v.innerHTML = renderResp(); return; }
+  if (!rows.length && !cats.length){ v.innerHTML = `<div class="empty"><h2>Este plan está vacío</h2><p>Empieza por crear sus líneas estratégicas. Dentro de cada una podrás añadir grupos, sub-grupos y acciones.</p>${canWrite?`<p><button class="btn primary" id="first-line">+ Primera línea estratégica</button></p>`:""}</div>`; const fl = $("#first-line"); if (fl) fl.onclick = e => openCatPop({ mode:"new", level:"modulo" }, e.currentTarget); return; }
   v.innerHTML = st.view === "calendario" ? renderCal() : st.view === "cronograma" ? renderGantt() : renderLista();
 }
 function render(){ renderFilterLabels(); renderSummary(); renderView(); }
@@ -562,7 +629,13 @@ function bindView(){
     const as = t.closest("[data-addsub]"); if (as){ e.stopPropagation(); newSub(as.dataset.addsub); return; }
     const cal = t.closest("[data-cal]");
     if (cal){ const k = +cal.dataset.cal; if (k===0) st.cal = today.slice(0,7); else { const [y,m] = st.cal.split("-").map(Number); const d = new Date(y, m-1+k, 1); st.cal = d.getFullYear()+"-"+pad(d.getMonth()+1); } saveUi(); renderView(); return; }
-    const rn = t.closest("[data-ren]"); if (rn){ e.stopPropagation(); openRename(JSON.parse(rn.dataset.ren)); return; }
+    const ep = t.closest("[data-editplan]"); if (ep){ e.stopPropagation(); openPlan(ep.dataset.editplan); return; }
+    if (t.closest("[data-newplan]")){ openPlan(null); return; }
+    const gt = t.closest("[data-goto]"); if (gt){ const id = gt.dataset.goto; enterPlan(gt.dataset.plan, () => openDrawer(id)); return; }
+    const ad = t.closest("[data-admin]"); if (ad){ adminMode = true; st.view = ad.dataset.admin; saveUi(); render(); if (st.view === "usuarios") loadUsuarios().then(renderView); return; }
+    const op = t.closest("[data-open]"); if (op){ enterPlan(op.dataset.open); return; }
+    const rn = t.closest("[data-ren]"); if (rn){ e.stopPropagation(); openCatPop(Object.assign({ mode:"edit" }, JSON.parse(rn.dataset.ren)), rn); return; }
+    const nc = t.closest("[data-newcat]"); if (nc){ e.stopPropagation(); openCatPop(Object.assign({ mode:"new" }, JSON.parse(nc.dataset.newcat)), nc); return; }
     if (t.closest("[data-newresp]")){ openResp(null); return; }
     if (t.closest("[data-newuser]")){ openUser(null); return; }
     const up = t.closest("[data-userpass]"); if (up){ e.stopPropagation(); openUser(up.dataset.userpass, true); return; }
@@ -577,7 +650,8 @@ function bindView(){
   $("#view").addEventListener("keydown", e => {
     if (!(e.key==="Enter"||e.key===" ")) return;
     const t = e.target;
-    if (t.matches("[data-id]")){ e.preventDefault(); openDrawer(t.dataset.id); }
+    if (t.matches("[data-open]")){ e.preventDefault(); enterPlan(t.dataset.open); }
+    else if (t.matches("[data-id]")){ e.preventDefault(); openDrawer(t.dataset.id); }
     else if (t.matches("[data-resp]")){ e.preventDefault(); openResp(t.dataset.resp); }
     else if (t.matches("[data-user]")){ e.preventDefault(); openUser(t.dataset.user); }
     else if (t.matches("[data-orphan]") && isAdmin){ e.preventDefault(); openResp(null, t.dataset.orphan); }
@@ -614,7 +688,7 @@ function renderDrawer(){
   if (!drawer) return;
   if (drawer.kind === "resp") return renderRespDrawer();
   if (drawer.kind === "user") return renderUserDrawer();
-  if (drawer.kind === "rename") return renderRenameDrawer();
+  if (drawer.kind === "plan") return renderPlanDrawer();
   const d = drawer.draft, ro = !canWrite, isSub = !!d.padre, parent = isSub ? byId.get(d.padre) : null;
   const dis = ro ? "disabled" : "";
   const dl = (id, vals) => `<datalist id="${id}">${vals.map(v=>`<option value="${esc(v)}"></option>`).join("")}</datalist>`;
@@ -694,13 +768,14 @@ async function saveAct(){
   try {
     let res;
     if (prev) res = await sb.from("acciones").update(body).eq("id", prev.id).select("id");
-    else res = await sb.from("acciones").insert(Object.assign({ id: newId(), creado: now }, body)).select("id");
+    else res = await sb.from("acciones").insert(withPlan(Object.assign({ id: newId(), creado: now }, body))).select("id");
     if (res.error) throw res.error;
     if (!res.data || !res.data.length) throw { message: "permission" };
     if (prev && !body.padre && (prev.modulo!==body.modulo || prev.grupo!==body.grupo || prev.subgrupo!==body.subgrupo)){
       const r2 = await sb.from("acciones").update({ modulo:body.modulo, grupo:body.grupo, subgrupo:body.subgrupo }).eq("padre", prev.id);
       if (r2.error) throw r2.error;
     }
+    if (!body.padre) await ensureCats(body.modulo, body.grupo);
     await loadAcciones(); refresh();
     const back = body.padre && !prev ? body.padre : null;
     closeDrawer(); toast(prev ? "Cambios guardados" : (body.padre ? "Subtarea creada" : "Actividad creada"));
@@ -759,74 +834,149 @@ async function saveResp(){
   await loadResps(); refresh(); closeDrawer(); toast(prev ? "Responsable actualizado" : "Responsable añadido");
 }
 
-/* ---------- Renombrar módulo / grupo / sub-grupo ---------- */
+/* ---------- Líneas estratégicas, grupos y sub-grupos: crear, renombrar, ordenar ---------- */
 const SIN = { modulo:"Sin módulo", grupo:"Sin grupo", subgrupo:"Sin sub-grupo" };
-const raw = (lv, v) => v === SIN[lv] ? "" : v;
+const raw = (lv, v) => v === SIN[lv] ? "" : (v || "");
 function inScope(r, x){
   if ((r.modulo||"") !== raw("modulo", x.m)) return false;
   if (x.level !== "modulo" && (r.grupo||"") !== raw("grupo", x.g)) return false;
   if (x.level === "subgrupo" && (r.subgrupo||"") !== raw("subgrupo", x.s)) return false;
   return true;
 }
-function openRename(x){
-  const cur = x.level === "modulo" ? x.m : x.level === "grupo" ? x.g : x.s;
-  drawer = { kind:"rename", x, cur, draft:{ nombre: raw(x.level, cur) }, error:"" };
-  renderDrawer();
-  setTimeout(() => { const f = $("#rn-nombre"); if (f){ f.focus(); f.select(); } }, 30);
+function namesAt(level, m, g){
+  if (level === "modulo") return uniq(rows.map(r => r.modulo).concat(cats.filter(c => c.nivel === "modulo").map(c => c.modulo)));
+  if (level === "grupo") return uniq(rows.filter(r => r.modulo === m).map(r => r.grupo).concat(cats.filter(c => c.nivel === "grupo" && c.modulo === m).map(c => c.grupo)));
+  return uniq(rows.filter(r => r.modulo === m && r.grupo === g).map(r => r.subgrupo));
 }
-function renameSiblings(x){
-  return uniq(rows.filter(r => (x.level === "modulo") || ((r.modulo||"") === raw("modulo", x.m) && (x.level === "grupo" || (r.grupo||"") === raw("grupo", x.g)))).map(r => r[x.level]));
+async function ensureCats(m, g){
+  if (catsMissing || !m) return;
+  const ins = [];
+  if (!catRow("modulo", m)) ins.push(withPlan({ nivel:"modulo", modulo:m, grupo:"", orden: nextOrd("modulo") }));
+  if (g && !catRow("grupo", m, g)) ins.push(withPlan({ nivel:"grupo", modulo:m, grupo:g, orden: nextOrd("grupo", m) }));
+  if (!ins.length) return;
+  try { await sb.from("categorias").upsert(ins, { onConflict: CONFLICT(), ignoreDuplicates:true }); await loadCats(); } catch(e){}
 }
-function renderRenameDrawer(){
-  const x = drawer.x, d = drawer.draft, n = rows.filter(r => inScope(r, x));
-  const crumb = x.level === "modulo" ? "" : x.level === "grupo" ? x.m : x.m + " › " + x.g;
-  $("#drawer-root").innerHTML = `<div class="scrim" id="scrim"></div>
-  <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title">
-    <div class="dhead"><h2 id="d-title">Cambiar nombre del ${LVNAME[x.level]}</h2><button class="btn" id="d-close" aria-label="Cerrar">✕</button></div>
-    ${crumb ? `<div class="crumb">${esc(crumb)}</div>` : ""}
-    <form class="dbody" id="d-form">
-      <div class="fld full"><label for="rn-nombre">Nombre</label><input id="rn-nombre" value="${esc(d.nombre)}" maxlength="120"></div>
-      <p class="muted full" style="font-size:13px;margin:0">Nombre actual: <b>${esc(drawer.cur)}</b>. El cambio se aplica a sus ${n.length} actividades y subtareas, y lo ve todo el equipo.</p>
-      <div class="infobox full" id="rn-warn" hidden></div>
-    </form>
-    <div class="dfoot"><div></div>
-      <div class="r"><span class="err">${esc(drawer.error)}</span><button class="btn" id="d-cancel">Cancelar</button><button class="btn primary" id="d-save">Guardar</button></div>
+function closePop(){ pop = null; const r = $("#pop-root"); if (r) r.innerHTML = ""; }
+function openCatPop(x, anchor){
+  closeMs(); closePop();
+  const isNew = x.mode === "new", M = raw("modulo", x.m), G = raw("grupo", x.g);
+  const cur = isNew ? "" : (x.level === "modulo" ? M : x.level === "grupo" ? G : raw("subgrupo", x.s));
+  const ordered = x.level !== "subgrupo";
+  const ord = !ordered ? null : isNew ? nextOrd(x.level, M) : catOrd(x.level, M, G);
+  const n = isNew ? 0 : rows.filter(r => inScope(r, x)).length;
+  const emptyCat = !isNew && n === 0 && x.level !== "subgrupo";
+  const title = isNew ? (x.level === "modulo" ? "Nueva línea estratégica" : `Nuevo grupo en ${M}`) : (x.level === "modulo" ? "Línea estratégica" : x.level === "grupo" ? "Grupo" : "Sub-grupo");
+  pop = { x, isNew, M, G, cur, ord };
+  let root = $("#pop-root"); if (!root){ root = document.createElement("div"); root.id = "pop-root"; document.body.appendChild(root); }
+  root.innerHTML = `<form class="pop" id="pop" role="dialog" aria-labelledby="pop-t" novalidate>
+    <div class="pop-t" id="pop-t">${esc(title)}</div>
+    <div class="pop-g ${ordered ? "" : "one"}">
+      <div class="fld"><label for="pop-nombre">Nombre</label><input id="pop-nombre" value="${esc(cur)}" maxlength="120" autocomplete="off"></div>
+      ${ordered ? `<div class="fld"><label for="pop-orden">Orden</label><input id="pop-orden" type="number" min="1" step="1" inputmode="numeric" value="${ord ?? ""}"></div>` : ""}
     </div>
-  </aside>`;
-  bindDrawerCommon();
-  const inp = $("#rn-nombre");
-  const warn = $("#rn-warn");
+    <div class="pop-n" id="pop-n">${isNew ? (ordered ? "El orden decide su posición: 1 aparece primero." : "") : `Se aplica a ${n} ${n === 1 ? "actividad" : "actividades"}.${ordered ? " Orden 1 aparece primero." : ""}`}</div>
+    <div class="pop-w" id="pop-w" hidden></div>
+    <div class="err" id="pop-err"></div>
+    <div class="pop-f">${emptyCat ? `<button type="button" class="btn link dangertxt" id="pop-del">Eliminar</button>` : "<span></span>"}<span class="sp"></span><button type="button" class="btn small" id="pop-cancel">Cancelar</button><button type="submit" class="btn small primary" id="pop-save">${isNew ? "Crear" : "Guardar"}</button></div>
+  </form>`;
+  const el = $("#pop"), r = anchor.getBoundingClientRect();
+  const w = el.offsetWidth, h = el.offsetHeight;
+  let left = Math.min(Math.max(8, r.left - 8), window.innerWidth - w - 8);
+  let top = r.bottom + 6; if (top + h > window.innerHeight - 8 && r.top - h - 6 > 8) top = r.top - h - 6;
+  el.style.left = (left + window.scrollX) + "px"; el.style.top = (top + window.scrollY) + "px";
+  const inp = $("#pop-nombre"), warn = $("#pop-w");
   const check = () => {
-    d.nombre = inp.value; const nuevo = inp.value.trim();
-    const merge = nuevo && nuevo !== raw(x.level, drawer.cur) && renameSiblings(x).includes(nuevo);
-    warn.hidden = !merge;
-    warn.textContent = merge ? `Ya existe un ${LVNAME[x.level]} llamado «${nuevo}». Si guardas, las actividades de los dos quedarán juntas en uno solo.` : "";
+    const v = inp.value.trim(), exists = v && v !== cur && namesAt(x.level, M, G).includes(v);
+    warn.hidden = !exists;
+    warn.textContent = !exists ? "" : isNew ? "Ya existe uno con ese nombre." : "Ya existe uno con ese nombre. Si guardas, los dos quedarán unidos en uno solo.";
   };
-  inp.addEventListener("input", check); check();
-  inp.addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); saveRename(); } });
-  $("#d-save").onclick = saveRename;
+  inp.addEventListener("input", check);
+  el.addEventListener("submit", e => { e.preventDefault(); savePop(); });
+  $("#pop-cancel").onclick = closePop;
+  const del = $("#pop-del"); if (del) del.onclick = deletePop;
+  inp.focus(); inp.select();
 }
-async function saveRename(){
-  const x = drawer.x, nuevo = String(drawer.draft.nombre||"").trim(), viejo = raw(x.level, drawer.cur);
-  if (!nuevo){ drawer.error = "Escribe un nombre."; renderDrawer(); return; }
-  if (nuevo === viejo){ closeDrawer(); return; }
-  busy(true);
-  let q = sb.from("acciones").update({ [x.level]: nuevo, actualizado: new Date().toISOString(), actualizado_por: me.id }).eq("modulo", raw("modulo", x.m));
-  if (x.level !== "modulo") q = q.eq("grupo", raw("grupo", x.g));
+async function savePop(){
+  const { x, isNew, M, G, cur, ord } = pop;
+  const nombre = $("#pop-nombre").value.trim(), oEl = $("#pop-orden");
+  const ordTxt = oEl ? oEl.value.trim() : "", orden = ordTxt === "" ? null : Number(ordTxt);
+  const err = m => { $("#pop-err").textContent = m; };
+  if (!nombre) return err("Escribe un nombre.");
+  if (orden !== null && (!Number.isInteger(orden) || orden < 1)) return err("El orden debe ser un número entero mayor que 0.");
+  const btn = $("#pop-save"); btn.disabled = true;
+  try {
+    if (isNew){
+      if (namesAt(x.level, M, G).includes(nombre)){ btn.disabled = false; return err("Ya existe uno con ese nombre."); }
+      const row = withPlan({ nivel: x.level, modulo: x.level === "modulo" ? nombre : M, grupo: x.level === "grupo" ? nombre : "", orden: null });
+      const { error } = await sb.from("categorias").insert(row); if (error) throw error;
+      if (x.level === "grupo") delete st.col["m:"+(M || SIN.modulo)];
+      await loadCats();
+      await reorder(x.level, M, nombre, orden ?? nextOrd(x.level, M));
+    } else {
+      if (nombre !== cur){ await renameCat(x, M, G, cur, nombre); await Promise.all([loadAcciones(), loadCats()]); }
+      if (x.level !== "subgrupo" && orden !== ord){
+        if (orden === null){
+          const { error } = await sb.from("categorias").upsert(withPlan({ nivel: x.level, modulo: x.level === "modulo" ? nombre : M, grupo: x.level === "grupo" ? nombre : "", orden: null }), { onConflict: CONFLICT() });
+          if (error) throw error;
+        } else await reorder(x.level, M, nombre, orden);
+      }
+    }
+    saveUi();
+    await Promise.all([loadAcciones(), loadCats()]); refresh(); closePop();
+    toast(isNew ? (x.level === "modulo" ? "Línea estratégica creada" : "Grupo creado") : "Cambios guardados");
+  } catch(e){ btn.disabled = false; err(dbErr(e)); }
+}
+/* Coloca «name» en la posición «orden» y renumera sus hermanos 1, 2, 3… */
+async function reorder(level, M, name, orden){
+  const t = groupTree(rows.filter(isTop).map(r => ({ r })), true);
+  let list = level === "modulo" ? [...t.keys()] : [...(t.get(M || SIN.modulo) || new Map()).keys()];
+  list = list.map(v => raw(level, v)).filter(v => v && v !== name);
+  list.splice(Math.max(0, Math.min(orden - 1, list.length)), 0, name);
+  const ups = list.map((v, i) => withPlan({ nivel: level, modulo: level === "modulo" ? v : M, grupo: level === "grupo" ? v : "", orden: i + 1 }))
+    .filter(u => catOrd(level, u.modulo, u.grupo) !== u.orden);
+  if (!ups.length) return;
+  const { error } = await sb.from("categorias").upsert(ups, { onConflict: CONFLICT() });
+  if (error) throw error;
+}
+async function renameCat(x, M, G, viejo, nuevo){
+  const stamp = { actualizado: new Date().toISOString(), actualizado_por: me.id };
+  let q = sb.from("acciones").update(Object.assign({ [x.level]: nuevo }, stamp)).eq("modulo", M);
+  if (!plansMissing) q = q.eq("plan_id", curPlan);
+  if (x.level !== "modulo") q = q.eq("grupo", G);
   if (x.level === "subgrupo") q = q.eq("subgrupo", raw("subgrupo", x.s));
-  const { data, error } = await q.select("id");
-  if (error){ drawer.error = dbErr(error); renderDrawer(); return; }
-  if (!data || !data.length){ drawer.error = "No se ha cambiado nada. Comprueba que tienes permiso de edición."; renderDrawer(); return; }
-  // mantener filtros y desplegables apuntando al nombre nuevo
-  const k = x.level === "modulo" ? "modulo" : x.level === "grupo" ? "grupo" : "subgrupo";
+  const { error } = await q; if (error) throw error;
+  const del = async id => { const r = await sb.from("categorias").delete().eq("id", id); if (r.error) throw r.error; };
+  const upd = async (id, v) => { const r = await sb.from("categorias").update(v).eq("id", id); if (r.error) throw r.error; };
+  if (!catsMissing && x.level === "modulo"){
+    const own = catRow("modulo", M);
+    if (own){ if (catRow("modulo", nuevo)) await del(own.id); else await upd(own.id, { modulo: nuevo }); }
+    for (const c of cats.filter(c => c.nivel === "grupo" && c.modulo === M)){
+      if (catRow("grupo", nuevo, c.grupo)) await del(c.id); else await upd(c.id, { modulo: nuevo });
+    }
+  } else if (!catsMissing && x.level === "grupo"){
+    const own = catRow("grupo", M, G);
+    if (own){ if (catRow("grupo", M, nuevo)) await del(own.id); else await upd(own.id, { grupo: nuevo }); }
+  }
+  // filtros y desplegables siguen al nombre nuevo
+  const k = x.level;
   st.f[k] = st.f[k].map(v => v === viejo ? nuevo : v);
-  const oldKey = x.level === "modulo" ? "m:"+x.m : x.level === "grupo" ? "g:"+x.m+"|"+x.g : "s:"+x.m+"|"+x.g+"|"+x.s;
-  const newKey = x.level === "modulo" ? "m:"+nuevo : x.level === "grupo" ? "g:"+x.m+"|"+nuevo : "s:"+x.m+"|"+x.g+"|"+nuevo;
+  const shown = v => v || SIN[k];
+  const oldKey = k === "modulo" ? "m:"+shown(viejo) : k === "grupo" ? "g:"+x.m+"|"+shown(viejo) : "s:"+x.m+"|"+x.g+"|"+shown(viejo);
+  const newKey = k === "modulo" ? "m:"+nuevo : k === "grupo" ? "g:"+x.m+"|"+nuevo : "s:"+x.m+"|"+x.g+"|"+nuevo;
   if (st.col[oldKey]){ delete st.col[oldKey]; st.col[newKey] = true; }
-  saveUi();
-  await loadAcciones(); refresh(); closeDrawer();
-  toast(`Nombre cambiado en ${data.length} ${data.length === 1 ? "actividad" : "actividades"}`);
 }
+async function deletePop(){
+  const { x, M, G } = pop;
+  try {
+    let q = sb.from("categorias").delete().eq("modulo", M);
+    if (!plansMissing) q = q.eq("plan_id", curPlan);
+    if (x.level === "grupo") q = q.eq("nivel", "grupo").eq("grupo", G);
+    const { error } = await q; if (error) throw error;
+    await loadCats(); refresh(); closePop(); toast("Eliminado");
+  } catch(e){ $("#pop-err").textContent = dbErr(e); }
+}
+document.addEventListener("pointerdown", e => { if (pop && !e.target.closest("#pop") && !e.target.closest("[data-ren],[data-newcat],#newline")) closePop(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && pop){ e.stopImmediatePropagation(); closePop(); } }, true);
 
 /* ---------- Ficha de usuario (administradores) ---------- */
 function genPassword(){
@@ -890,6 +1040,151 @@ async function saveUser(){
   } catch(e){ drawer.error = e.message; renderDrawer(); }
 }
 
+/* ---------- Planes estratégicos: pantalla de inicio ---------- */
+const ESTPLAN = { activo:"Activo", borrador:"Borrador", cerrado:"Cerrado" };
+const MESL = d => { const x = parse(d); return x ? MES3[x.getMonth()] + " " + x.getFullYear() : ""; };
+function duracion(a, b){
+  const A = parse(a), B = parse(b); if (!A || !B) return "";
+  const m = (B.getFullYear()-A.getFullYear())*12 + B.getMonth()-A.getMonth() + 1;
+  return m % 12 === 0 ? `${m/12} ${m === 12 ? "año" : "años"}` : `${m} meses`;
+}
+function periodo(p){
+  if (p.inicio && p.fin) return `${MESL(p.inicio)} – ${MESL(p.fin)} · ${duracion(p.inicio, p.fin)}`;
+  if (p.inicio) return `Desde ${MESL(p.inicio)}`;
+  if (p.fin) return `Hasta ${MESL(p.fin)}`;
+  return "Periodo sin definir";
+}
+function planStats(p){
+  const all = allRows.filter(r => r.plan_id === p.id), tops = all.filter(r => !r.padre);
+  const pc = allCats.filter(c => c.plan_id === p.id);
+  const lines = uniq(pc.filter(c => c.nivel === "modulo").sort((a,b)=>(a.orden??1e6)-(b.orden??1e6)).map(c => c.modulo).concat(tops.map(r => r.modulo)));
+  const per = lines.map(l => { const t = tops.filter(r => r.modulo === l); return { l, n: t.length, c: t.filter(r => r.estado === "Cerrada").length }; });
+  const cerr = tops.filter(r => r.estado === "Cerrada").length;
+  let tiempo = null;
+  if (p.inicio && p.fin){ const tot = diffDays(p.inicio, p.fin) || 1; tiempo = Math.max(0, Math.min(100, Math.round(diffDays(p.inicio, today) / tot * 100))); }
+  return { n: tops.length, sub: all.length - tops.length, cerr, curso: tops.filter(r => r.estado === "En curso").length,
+    late: all.filter(isOverdue).length, pct: tops.length ? Math.round(cerr*100/tops.length) : 0, tiempo, per,
+    grupos: pc.filter(c => c.nivel === "grupo").length };
+}
+function saludo(){ const h = new Date().getHours(); return h < 14 ? "Buenos días" : h < 21 ? "Buenas tardes" : "Buenas noches"; }
+function renderHome(){
+  const fecha = new Intl.DateTimeFormat("es-ES", { weekday:"long", day:"numeric", month:"long", year:"numeric" }).format(new Date());
+  const rank = { activo:0, borrador:1, cerrado:2 };
+  const list = planes.slice().sort((a,b) => (rank[a.estado]??3) - (rank[b.estado]??3) || String(b.inicio||"").localeCompare(String(a.inicio||"")) || a.nombre.localeCompare(b.nombre));
+  let h = `<section class="home">
+    <div class="hello"><div><h2>${saludo()}, ${esc((me.nombre || me.usuario).split(" ")[0])}</h2><p class="muted">${esc(fecha.charAt(0).toUpperCase()+fecha.slice(1))}</p></div>
+      ${isAdmin ? `<div class="hello-acts"><button class="btn" data-admin="responsables">Responsables</button><button class="btn" data-admin="usuarios">Usuarios</button></div>` : `<div class="hello-acts"><button class="btn" data-admin="responsables">Responsables</button></div>`}</div>`;
+  // Mis acciones (todas los planes)
+  if (me.responsable){
+    const mias = allRows.filter(r => r.estado !== "Cerrada" && splitResp(r.responsable).includes(me.responsable) && planOf(r.plan_id));
+    const late = mias.filter(isOverdue), soon = mias.filter(r => r.fin && r.fin >= today && r.fin <= addDays(today, 7));
+    const next = mias.slice().sort((a,b) => (a.fin||"9999").localeCompare(b.fin||"9999")).slice(0, 6);
+    h += `<div class="mybox"><div class="mytiles">
+        <div class="tile"><b>${mias.length}</b><span>Mis acciones abiertas</span></div>
+        <div class="tile ${late.length?"bad":""}"><b>${late.length}</b><span>Vencidas</span></div>
+        <div class="tile"><b>${soon.length}</b><span>Cierran en 7 días</span></div></div>
+      <div class="mynext"><div class="sect"><span>Próximos cierres</span></div>${next.length ? `<ul>${next.map(r => `<li><button class="mylink" data-goto="${esc(r.id)}" data-plan="${esc(r.plan_id)}"><span class="mono ${isOverdue(r)?"late":""}">${r.fin ? fmt(r.fin) : "sin fecha"}</span><span class="t">${esc(r.actividad)}</span><span class="pl">${esc(planOf(r.plan_id)?.nombre || "")}</span></button></li>`).join("")}</ul>` : `<p class="muted" style="margin:0;font-size:13px">No tienes acciones abiertas. Buen trabajo.</p>`}</div></div>`;
+  }
+  h += `<div class="plans-head"><h2>Planes por periodo</h2><span class="muted">${planes.length} ${planes.length === 1 ? "plan" : "planes"}</span></div><div class="plans">`;
+  for (const p of list){
+    const s = planStats(p), more = s.per.length - 4;
+    h += `<article class="plan est-${esc(p.estado)}" data-open="${esc(p.id)}" tabindex="0" aria-label="Abrir ${esc(p.nombre)}">
+      <div class="plan-top"><span class="pst">${ESTPLAN[p.estado] || p.estado}</span>${isAdmin ? `<button class="ren" data-editplan="${esc(p.id)}" title="Editar plan" aria-label="Editar ${esc(p.nombre)}"><svg width="11" height="11" viewBox="0 0 16 16" aria-hidden="true"><path d="M11.3 2.3a1.5 1.5 0 0 1 2.1 2.1L5.6 12.2 2.5 13l.8-3.1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>` : ""}</div>
+      <h3>${esc(p.nombre)}</h3>
+      <div class="per">${esc(periodo(p))}</div>
+      ${p.descripcion ? `<p class="desc">${esc(p.descripcion)}</p>` : ""}
+      <div class="meters">
+        <div class="meter"><div class="ml"><span>Tiempo transcurrido</span><b>${s.tiempo === null ? "—" : s.tiempo + "%"}</b></div><div class="mbar time"><i style="width:${s.tiempo ?? 0}%"></i></div></div>
+        <div class="meter"><div class="ml"><span>Acciones cerradas</span><b>${s.pct}%</b></div><div class="mbar done"><i style="width:${s.pct}%"></i></div></div>
+      </div>
+      <div class="pnums"><span><b>${s.per.length}</b> líneas</span><span><b>${s.grupos}</b> grupos</span><span><b>${s.n}</b> acciones</span><span><b>${s.curso}</b> en curso</span>${s.late ? `<span class="late"><b>${s.late}</b> vencidas</span>` : ""}</div>
+      ${s.per.length ? `<ul class="plines">${s.per.slice(0,4).map(x => `<li><span class="ln">${esc(x.l)}</span><span class="minibar"><i style="width:${x.n ? Math.round(x.c*100/x.n) : 0}%"></i></span><span class="mono">${x.c}/${x.n}</span></li>`).join("")}${more > 0 ? `<li class="muted">y ${more} ${more === 1 ? "línea" : "líneas"} más</li>` : ""}</ul>` : `<p class="muted" style="font-size:13px;margin:0">Sin líneas estratégicas todavía.</p>`}
+      <div class="plan-foot">Abrir plan <span aria-hidden="true">→</span></div>
+    </article>`;
+  }
+  if (isAdmin) h += `<button class="plan plan-new" data-newplan><span class="plus" aria-hidden="true">+</span><b>Nuevo plan estratégico</b><span class="muted">Define el periodo y empieza a construir sus líneas, grupos y acciones.</span></button>`;
+  if (!planes.length && !isAdmin) h += `<div class="note">Aún no hay planes. Un administrador puede crear el primero.</div>`;
+  return h + `</div></section>`;
+}
+function renderHeader(){
+  const p = curPlan ? planOf(curPlan) : null, home = loaded && !plansMissing && !curPlan && !adminMode;
+  document.querySelector("header.top").classList.toggle("hero", home);
+  $("#back").hidden = !(p || adminMode);
+  $("#h-eyebrow").textContent = p ? `Plan estratégico · ${periodo(p)}` : adminMode ? "Almesa · Administración" : "Almesa · Dirección estratégica";
+  $("#h-title").textContent = p ? p.nombre : adminMode ? "Responsables y usuarios" : (plansMissing ? "Seguimiento de acciones" : "Planes estratégicos");
+  $("#h-sub").hidden = !home;
+  document.title = (p ? p.nombre + " · " : "") + "Seguimiento Plan Estratégico · Almesa";
+}
+function enterPlan(id, then){
+  curPlan = id; adminMode = false; closeDrawer(); closePop(); closeMs();
+  st.f = blankF(); if (!["lista","calendario","cronograma"].includes(st.view)) st.view = "lista";
+  derive(); saveUi(); render(); window.scrollTo(0, 0);
+  if (then) then();
+}
+function goHome(){ curPlan = null; adminMode = false; closeDrawer(); closePop(); closeMs(); derive(); render(); window.scrollTo(0, 0); }
+
+/* Ficha de plan (solo administradores) */
+function openPlan(id){
+  const p = id ? planOf(id) : null;
+  drawer = { kind:"plan", id, draft: p ? {...p, copiar:""} : { nombre:"", descripcion:"", inicio:"", fin:"", estado:"activo", copiar:"" }, confirmDel:false, error:"" };
+  renderDrawer();
+  setTimeout(() => { const f = $("#p-nombre"); f && f.focus(); }, 30);
+}
+function renderPlanDrawer(){
+  const d = drawer.draft, isNew = !drawer.id;
+  const n = drawer.id ? allRows.filter(r => r.plan_id === drawer.id).length : 0;
+  const otros = planes.filter(p => p.id !== drawer.id);
+  $("#drawer-root").innerHTML = `<div class="scrim" id="scrim"></div>
+  <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title">
+    <div class="dhead"><h2 id="d-title">${isNew ? "Nuevo plan estratégico" : "Editar plan"}</h2><button class="btn" id="d-close" aria-label="Cerrar">✕</button></div>
+    <form class="dbody" id="d-form">
+      <div class="fld full"><label for="p-nombre">Nombre del plan</label><input id="p-nombre" value="${esc(d.nombre)}" maxlength="120" placeholder="p. ej. Plan Estratégico 2027–2029"></div>
+      <div class="fld"><label for="p-inicio">Inicio del periodo</label><input id="p-inicio" type="date" value="${esc(d.inicio||"")}"></div>
+      <div class="fld"><label for="p-fin">Fin del periodo</label><input id="p-fin" type="date" value="${esc(d.fin||"")}"></div>
+      <div class="fld full"><label for="p-estado">Estado</label><select id="p-estado">${Object.entries(ESTPLAN).map(([k,v]) => `<option value="${k}" ${d.estado===k?"selected":""}>${v}</option>`).join("")}</select></div>
+      <div class="fld full"><label for="p-descripcion">Descripción / objetivo general</label><textarea id="p-descripcion" rows="3">${esc(d.descripcion)}</textarea></div>
+      ${isNew && otros.length ? `<div class="fld full"><label for="p-copiar">Partir de la estructura de otro plan</label><select id="p-copiar"><option value="">No, empezar en blanco</option>${otros.map(p => `<option value="${esc(p.id)}">${esc(p.nombre)}</option>`).join("")}</select><span class="muted" style="font-size:12px">Copia sus líneas estratégicas y grupos, con su orden. Las acciones no se copian.</span></div>` : ""}
+      ${!isNew ? `<p class="muted full" style="font-size:13px;margin:0">Este plan tiene ${n} ${n === 1 ? "acción" : "acciones"}.</p>` : ""}
+    </form>
+    <div class="dfoot">
+      <div>${!isNew ? (n ? `<span class="muted" style="font-size:13px">Para retirarlo, márcalo como «Cerrado».</span>` : drawer.confirmDel ? `<span class="err">¿Eliminar el plan?</span> <button class="btn danger" id="d-del-yes">Sí, eliminar</button> <button class="btn" id="d-del-no">No</button>` : `<button class="btn danger" id="d-del">Eliminar</button>`) : ""}</div>
+      <div class="r"><span class="err">${esc(drawer.error)}</span><button class="btn" id="d-cancel">Cancelar</button><button class="btn primary" id="d-save">${isNew ? "Crear y abrir" : "Guardar"}</button></div>
+    </div>
+  </aside>`;
+  bindDrawerCommon();
+  $("#d-form").addEventListener("input", e => { const k = e.target.id.slice(2); d[k] = e.target.value; });
+  $("#d-form").addEventListener("change", e => { const k = e.target.id.slice(2); d[k] = e.target.value; });
+  $("#d-save").onclick = savePlan;
+  const dy = $("#d-del-yes"); if (dy) dy.onclick = async () => {
+    const { error } = await sb.from("planes").delete().eq("id", drawer.id);
+    if (error){ drawer.error = dbErr(error); renderDrawer(); return; }
+    await Promise.all([loadPlanes(), loadCats()]); closeDrawer(); goHome(); toast("Plan eliminado");
+  };
+}
+async function savePlan(){
+  const d = drawer.draft, isNew = !drawer.id;
+  const body = { nombre: String(d.nombre||"").trim(), descripcion: String(d.descripcion||"").trim(), inicio: d.inicio || null, fin: d.fin || null, estado: d.estado || "activo" };
+  if (!body.nombre){ drawer.error = "Escribe el nombre del plan."; renderDrawer(); return; }
+  if (body.inicio && body.fin && body.fin < body.inicio){ drawer.error = "El fin del periodo no puede ser anterior al inicio."; renderDrawer(); return; }
+  busy(true);
+  try {
+    let id = drawer.id;
+    if (isNew){
+      const { data, error } = await sb.from("planes").insert(body).select("id"); if (error) throw error;
+      id = data[0].id;
+      if (d.copiar){
+        const src = allCats.filter(c => c.plan_id === d.copiar).map(c => ({ plan_id: id, nivel: c.nivel, modulo: c.modulo, grupo: c.grupo, orden: c.orden }));
+        if (src.length){ const r = await sb.from("categorias").insert(src); if (r.error) throw r.error; }
+      }
+    } else {
+      const { error } = await sb.from("planes").update(body).eq("id", id); if (error) throw error;
+    }
+    await Promise.all([loadPlanes(), loadCats()]);
+    closeDrawer();
+    if (isNew){ toast("Plan creado"); enterPlan(id); } else { render(); toast("Plan actualizado"); }
+  } catch(e){ drawer.error = dbErr(e); renderDrawer(); }
+}
+
 /* ---------- arranque ---------- */
 /* Acepta la URL del proyecto escrita de cualquier forma habitual y la deja en https://REF.supabase.co */
 function normalizaUrl(u){
@@ -902,7 +1197,8 @@ function normalizaUrl(u){
   return m ? m[1] : u;
 }
 async function boot(){
-  if (!CFG.SUPABASE_URL || !CFG.SUPABASE_ANON_KEY || /TU-PROYECTO|PEGA_AQUI/.test(CFG.SUPABASE_URL + CFG.SUPABASE_ANON_KEY) || !window.supabase){ showConfigMissing(); return; }
+  if (!window.supabase){ gate(`<div class="eyebrow">Almesa · Plan estratégico</div><h1>No se pudo cargar Supabase</h1><p>El navegador no ha podido descargar la librería de Supabase. Recarga con Ctrl + F5. Si continúa, prueba en otro navegador o revisa si la red de la empresa bloquea cdn.jsdelivr.net.</p>`); return; }
+  if (!CFG.SUPABASE_URL || !CFG.SUPABASE_ANON_KEY || /TU-PROYECTO|PEGA_AQUI/.test(CFG.SUPABASE_URL + CFG.SUPABASE_ANON_KEY)){ showConfigMissing(); return; }
   sb = window.supabase.createClient(normalizaUrl(CFG.SUPABASE_URL), String(CFG.SUPABASE_ANON_KEY).trim(), { auth: { persistSession: true, autoRefreshToken: true } });
   buildMs(); bindStatic(); bindView();
   const { data: { session } } = await sb.auth.getSession();
