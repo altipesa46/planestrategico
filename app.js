@@ -3,7 +3,8 @@
  */
 (() => {
 "use strict";
-const CFG = window.APP_CONFIG || {};
+const APP_VERSION = "30.10-c";
+let CFG = window.APP_CONFIG || {};
 const ESTADOS = ["Pendiente","En curso","Standby","Cerrada"];
 const PRIOS = ["Alta","Media","Baja"];
 const MESES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
@@ -158,9 +159,18 @@ function gate(html, onsubmit){
   const first = f.querySelector("input"); first && first.focus();
 }
 function showConfigMissing(){
+  const det = !window.APP_CONFIG ? "El archivo config.js no se ha cargado (no está en el repositorio o el navegador no lo encuentra)."
+    : !CFG.SUPABASE_URL ? "En config.js falta SUPABASE_URL." : !CFG.SUPABASE_ANON_KEY ? "En config.js falta SUPABASE_ANON_KEY."
+    : "config.js aún tiene los valores de ejemplo (TU-PROYECTO / PEGA_AQUI).";
   gate(`<div class="eyebrow">Almesa · Plan estratégico</div><h1>Falta la configuración</h1>
-    <p>Edita <b>config.js</b> con la URL del proyecto de Supabase y su clave pública (anon). El README explica dónde encontrarlas.</p>`);
+    <p>${esc(det)}</p><p>Revisa <b>config.js</b> en GitHub: debe tener la URL del proyecto de Supabase y su clave pública (anon).</p>
+    <p class="muted" style="font-size:12px">Versión de la app ${APP_VERSION}</p>`);
 }
+/* Vuelve a pedir un script saltándose la caché del navegador */
+function loadFresh(src){
+  return new Promise(res => { const el = document.createElement("script"); el.src = src + (src.includes("?") ? "&" : "?") + "t=" + Date.now(); el.onload = () => res(true); el.onerror = () => res(false); document.head.appendChild(el); });
+}
+const cfgOk = c => c && c.SUPABASE_URL && c.SUPABASE_ANON_KEY && !/TU-PROYECTO|PEGA_AQUI/.test(c.SUPABASE_URL + c.SUPABASE_ANON_KEY);
 function showLogin(msg){
   gate(`<div class="eyebrow">Almesa · Plan estratégico</div><h1>Seguimiento de acciones</h1>
     <p>Entra con tu usuario y contraseña.</p>
@@ -168,7 +178,8 @@ function showLogin(msg){
     <div class="fld"><label for="lg-pass">Contraseña</label><input id="lg-pass" type="password" autocomplete="current-password"></div>
     <span class="err" id="lg-err">${esc(msg || "")}</span>
     <button class="btn primary" type="submit" id="lg-btn">Entrar</button>
-    <p style="font-size:12.5px">¿Has olvidado la contraseña? Pide a un administrador que te asigne una nueva.</p>`, doLogin);
+    <p style="font-size:12.5px">¿Has olvidado la contraseña? Pide a un administrador que te asigne una nueva.</p>
+    <p class="muted" style="font-size:11px;margin-top:-6px">Versión ${APP_VERSION}</p>`, doLogin);
 }
 async function doLogin(f){
   const u = f.querySelector("#lg-user").value.trim().toLowerCase(), p = f.querySelector("#lg-pass").value;
@@ -1350,8 +1361,12 @@ function normalizaUrl(u){
   return m ? m[1] : u;
 }
 async function boot(){
+  // Si el navegador trae copias antiguas, se piden de nuevo antes de rendirse
+  if (!cfgOk(window.APP_CONFIG)){ await loadFresh("config.js"); CFG = window.APP_CONFIG || {}; }
+  if (!window.supabase){ await loadFresh("supabase.js"); }
+  if (!window.supabase){ await loadFresh("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"); }
   if (!window.supabase){ gate(`<div class="eyebrow">Almesa · Plan estratégico</div><h1>No se pudo cargar Supabase</h1><p>El navegador no ha podido descargar la librería de Supabase. Recarga con Ctrl + F5. Si continúa, prueba en otro navegador o revisa si la red de la empresa bloquea cdn.jsdelivr.net.</p>`); return; }
-  if (!CFG.SUPABASE_URL || !CFG.SUPABASE_ANON_KEY || /TU-PROYECTO|PEGA_AQUI/.test(CFG.SUPABASE_URL + CFG.SUPABASE_ANON_KEY)){ showConfigMissing(); return; }
+  if (!cfgOk(CFG)){ showConfigMissing(); return; }
   sb = window.supabase.createClient(normalizaUrl(CFG.SUPABASE_URL), String(CFG.SUPABASE_ANON_KEY).trim(), { auth: { persistSession: true, autoRefreshToken: true } });
   buildMs(); bindStatic(); bindView();
   const { data: { session } } = await sb.auth.getSession();
