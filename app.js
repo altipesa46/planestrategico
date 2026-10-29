@@ -817,7 +817,7 @@ async function saveUser(){
 /* ---------- arranque ---------- */
 async function boot(){
   if (!CFG.SUPABASE_URL || !CFG.SUPABASE_ANON_KEY || /TU-PROYECTO|PEGA_AQUI/.test(CFG.SUPABASE_URL + CFG.SUPABASE_ANON_KEY) || !window.supabase){ showConfigMissing(); return; }
-  sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
+      sb = window.supabase.createClient((String(CFG.SUPABASE_URL).trim().match(/^https?:\/\/[^\/?#\s]+/i) || [CFG.SUPABASE_URL])[0], String(CFG.SUPABASE_ANON_KEY).trim(), { auth: { persistSession: true, autoRefreshToken: true } });
   buildMs(); bindStatic(); bindView();
   const { data: { session } } = await sb.auth.getSession();
   if (session) await enter(); else showLogin();
