@@ -4,7 +4,7 @@
 // y las reglas RLS de la base de datos. NUNCA pongas aquí la service_role key.
 window.APP_CONFIG = {
   SUPABASE_URL: "https://figoojrhrlwgetxnoxsd.supabase.co",
-  SUPABASE_ANON_KEY: "sb_publishable_aHMOBbaW1QMu4bbuE_C_gg_MvTsKAy-",
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpZ29vanJocmx3Z2V0eG5veHNkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMyNjQ3NjMsImV4cCI6MjEwODg0MDc2M30.szS7hWpJmp8xDxgIZ2jcAjuoHoTdkkR_WlEfKJSghn0",
   // Los usuarios entran con un nombre corto (p. ej. "jm"); internamente se
   // convierte en jm@<USER_DOMAIN>. Debe coincidir con el de la Edge Function y el script.
   USER_DOMAIN: "usuarios.almesa.app"
