@@ -1,0 +1,9 @@
+{
+  "name": "seguimiento-pe-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Script de alta inicial de usuarios en Supabase",
+  "dependencies": {
+    "@supabase/supabase-js": "2.45.4"
+  }
+}
