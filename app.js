@@ -38,6 +38,7 @@ let st = Object.assign({ view:"lista", cal: today.slice(0,7), col:{} }, store.ge
 st.f = Object.assign(blankF(), st.f || {});
 for (const k of MSKEYS) st.f[k] = Array.isArray(st.f[k]) ? st.f[k] : (st.f[k] ? [st.f[k]] : []);
 if (!st.col || typeof st.col !== "object") st.col = {};
+if (typeof st.showF !== "boolean") st.showF = window.innerWidth > 700;
 const saveUi = () => store.set("pe-ui", st);
 
 /* ---------- datos (Supabase) ---------- */
@@ -336,13 +337,15 @@ function renderFilterLabels(){
   $("#f-desde").value = st.f.desde; $("#f-hasta").value = st.f.hasta; $("#f-fechas").value = st.f.fechas;
   const active = MSKEYS.filter(k => st.f[k].length).length + ["desde","hasta","fechas"].filter(k => st.f[k]).length;
   $("#clear").disabled = !active;
-  $("#ftoggle").textContent = active ? `Filtros (${active})` : "Filtros";
+  $("#ftoggle").textContent = (st.showF ? "Ocultar filtros" : "Mostrar filtros") + (active ? ` (${active})` : "");
+  $("#ftoggle").setAttribute("aria-expanded", String(!!st.showF));
+  $("#filters").classList.toggle("collapsed", !st.showF);
 }
 function bindStatic(){
   for (const k of ["desde","hasta","fechas"]) $("#f-"+k).addEventListener("change", e => { st.f[k] = e.target.value; onFilterChange(k); });
   $("#clear").addEventListener("click", () => { st.f = blankF(); closeMs(); onFilterChange("modulo"); });
   $("#mine").addEventListener("click", () => { if (!me || !me.responsable) return; st.f = blankF(); st.f.resp = [me.responsable]; if (["responsables","usuarios"].includes(st.view)) st.view = "lista"; saveUi(); render(); });
-  $("#ftoggle").addEventListener("click", () => $("#filters").classList.toggle("collapsed"));
+  $("#ftoggle").addEventListener("click", () => { st.showF = !st.showF; if (!st.showF) closeMs(); saveUi(); renderFilterLabels(); });
   document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", async () => {
     st.view = b.dataset.view; saveUi(); render();
     if (st.view === "usuarios"){ await loadUsuarios(); renderView(); }
@@ -384,6 +387,8 @@ function dueHtml(r){
   if (r.estado !== "Cerrada"){ const d = diffDays(today, r.fin); sub = d < 0 ? `<small class="late">${-d} d de retraso</small>` : d === 0 ? `<small>hoy</small>` : `<small>en ${d} d</small>`; }
   return `<span class="mono ${isOverdue(r)?"late":""}">${fmt(r.fin)}</span>${sub}`;
 }
+const LVNAME = { modulo:"módulo", grupo:"grupo", subgrupo:"sub-grupo" };
+const renBtn = (level, m, g, s) => canWrite ? `<button class="ren" data-ren='${esc(JSON.stringify({level,m,g,s}))}' title="Cambiar nombre" aria-label="Cambiar nombre del ${LVNAME[level]} ${esc(level==="modulo"?m:level==="grupo"?g:s)}"><svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M11.3 2.3a1.5 1.5 0 0 1 2.1 2.1L5.6 12.2 2.5 13l.8-3.1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>` : "";
 const chevBtn = key => `<button class="chev" data-tog="${esc(key)}" aria-expanded="${!st.col[key]}" aria-label="${st.col[key]?"Desplegar":"Plegar"}">${CHEV}</button>`;
 function rowHtml(r, ind, o){
   o = o || {};
@@ -403,16 +408,16 @@ function renderLista(){
   let h = `<div class="tree">`;
   for (const [m, gm] of groupTree(vis)){
     const km = "m:"+m, mAll = [...gm.values()].flatMap(sm => [...sm.values()].flat());
-    h += `<div class="lv lv0" data-tog="${esc(km)}"><span class="nm">${chevBtn(km)}<b>${esc(m)}</b></span><span class="sts">${statsHtml(mAll)}</span></div>`;
+    h += `<div class="lv lv0" data-tog="${esc(km)}"><span class="nm">${chevBtn(km)}<b>${esc(m)}</b>${renBtn("modulo",m,"" ,"")}</span><span class="sts">${statsHtml(mAll)}</span></div>`;
     if (st.col[km]) continue;
     for (const [g, sm] of gm){
       const kg = "g:"+m+"|"+g, gAll = [...sm.values()].flat();
-      h += `<div class="lv lv1" data-tog="${esc(kg)}"><span class="nm">${chevBtn(kg)}<b>${esc(g)}</b></span><span class="sts">${statsHtml(gAll)}</span></div>`;
+      h += `<div class="lv lv1" data-tog="${esc(kg)}"><span class="nm">${chevBtn(kg)}<b>${esc(g)}</b>${renBtn("grupo",m,g,"")}</span><span class="sts">${statsHtml(gAll)}</span></div>`;
       if (st.col[kg]) continue;
       for (const [s, items] of sm){
         const ks = "s:"+m+"|"+g+"|"+s, closed = !!st.col[ks];
         h += `<div class="sh" data-tog="${esc(ks)}">
-          <div class="shn">${chevBtn(ks)}<b>${esc(s)}</b>${canWrite?`<button class="btn small" data-add='${esc(JSON.stringify({modulo:m,grupo:g,subgrupo:s}))}'>+ Añadir</button>`:""}<span class="shs">${statsHtml(items, true)}</span></div>
+          <div class="shn">${chevBtn(ks)}<b>${esc(s)}</b>${renBtn("subgrupo",m,g,s)}${canWrite?`<button class="btn small" data-add='${esc(JSON.stringify({modulo:m,grupo:g,subgrupo:s}))}'>+ Añadir</button>`:""}<span class="shs">${statsHtml(items, true)}</span></div>
           ${closed ? "" : `<span class="hc">Responsable</span><span class="hc">Estado</span><span class="hc">Prioridad</span><span class="hc">Inicio</span><span class="hc">Cierre objetivo</span>`}
         </div>`;
         if (closed) continue;
@@ -557,6 +562,7 @@ function bindView(){
     const as = t.closest("[data-addsub]"); if (as){ e.stopPropagation(); newSub(as.dataset.addsub); return; }
     const cal = t.closest("[data-cal]");
     if (cal){ const k = +cal.dataset.cal; if (k===0) st.cal = today.slice(0,7); else { const [y,m] = st.cal.split("-").map(Number); const d = new Date(y, m-1+k, 1); st.cal = d.getFullYear()+"-"+pad(d.getMonth()+1); } saveUi(); renderView(); return; }
+    const rn = t.closest("[data-ren]"); if (rn){ e.stopPropagation(); openRename(JSON.parse(rn.dataset.ren)); return; }
     if (t.closest("[data-newresp]")){ openResp(null); return; }
     if (t.closest("[data-newuser]")){ openUser(null); return; }
     const up = t.closest("[data-userpass]"); if (up){ e.stopPropagation(); openUser(up.dataset.userpass, true); return; }
@@ -608,6 +614,7 @@ function renderDrawer(){
   if (!drawer) return;
   if (drawer.kind === "resp") return renderRespDrawer();
   if (drawer.kind === "user") return renderUserDrawer();
+  if (drawer.kind === "rename") return renderRenameDrawer();
   const d = drawer.draft, ro = !canWrite, isSub = !!d.padre, parent = isSub ? byId.get(d.padre) : null;
   const dis = ro ? "disabled" : "";
   const dl = (id, vals) => `<datalist id="${id}">${vals.map(v=>`<option value="${esc(v)}"></option>`).join("")}</datalist>`;
@@ -752,6 +759,75 @@ async function saveResp(){
   await loadResps(); refresh(); closeDrawer(); toast(prev ? "Responsable actualizado" : "Responsable añadido");
 }
 
+/* ---------- Renombrar módulo / grupo / sub-grupo ---------- */
+const SIN = { modulo:"Sin módulo", grupo:"Sin grupo", subgrupo:"Sin sub-grupo" };
+const raw = (lv, v) => v === SIN[lv] ? "" : v;
+function inScope(r, x){
+  if ((r.modulo||"") !== raw("modulo", x.m)) return false;
+  if (x.level !== "modulo" && (r.grupo||"") !== raw("grupo", x.g)) return false;
+  if (x.level === "subgrupo" && (r.subgrupo||"") !== raw("subgrupo", x.s)) return false;
+  return true;
+}
+function openRename(x){
+  const cur = x.level === "modulo" ? x.m : x.level === "grupo" ? x.g : x.s;
+  drawer = { kind:"rename", x, cur, draft:{ nombre: raw(x.level, cur) }, error:"" };
+  renderDrawer();
+  setTimeout(() => { const f = $("#rn-nombre"); if (f){ f.focus(); f.select(); } }, 30);
+}
+function renameSiblings(x){
+  return uniq(rows.filter(r => (x.level === "modulo") || ((r.modulo||"") === raw("modulo", x.m) && (x.level === "grupo" || (r.grupo||"") === raw("grupo", x.g)))).map(r => r[x.level]));
+}
+function renderRenameDrawer(){
+  const x = drawer.x, d = drawer.draft, n = rows.filter(r => inScope(r, x));
+  const crumb = x.level === "modulo" ? "" : x.level === "grupo" ? x.m : x.m + " › " + x.g;
+  $("#drawer-root").innerHTML = `<div class="scrim" id="scrim"></div>
+  <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title">
+    <div class="dhead"><h2 id="d-title">Cambiar nombre del ${LVNAME[x.level]}</h2><button class="btn" id="d-close" aria-label="Cerrar">✕</button></div>
+    ${crumb ? `<div class="crumb">${esc(crumb)}</div>` : ""}
+    <form class="dbody" id="d-form">
+      <div class="fld full"><label for="rn-nombre">Nombre</label><input id="rn-nombre" value="${esc(d.nombre)}" maxlength="120"></div>
+      <p class="muted full" style="font-size:13px;margin:0">Nombre actual: <b>${esc(drawer.cur)}</b>. El cambio se aplica a sus ${n.length} actividades y subtareas, y lo ve todo el equipo.</p>
+      <div class="infobox full" id="rn-warn" hidden></div>
+    </form>
+    <div class="dfoot"><div></div>
+      <div class="r"><span class="err">${esc(drawer.error)}</span><button class="btn" id="d-cancel">Cancelar</button><button class="btn primary" id="d-save">Guardar</button></div>
+    </div>
+  </aside>`;
+  bindDrawerCommon();
+  const inp = $("#rn-nombre");
+  const warn = $("#rn-warn");
+  const check = () => {
+    d.nombre = inp.value; const nuevo = inp.value.trim();
+    const merge = nuevo && nuevo !== raw(x.level, drawer.cur) && renameSiblings(x).includes(nuevo);
+    warn.hidden = !merge;
+    warn.textContent = merge ? `Ya existe un ${LVNAME[x.level]} llamado «${nuevo}». Si guardas, las actividades de los dos quedarán juntas en uno solo.` : "";
+  };
+  inp.addEventListener("input", check); check();
+  inp.addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); saveRename(); } });
+  $("#d-save").onclick = saveRename;
+}
+async function saveRename(){
+  const x = drawer.x, nuevo = String(drawer.draft.nombre||"").trim(), viejo = raw(x.level, drawer.cur);
+  if (!nuevo){ drawer.error = "Escribe un nombre."; renderDrawer(); return; }
+  if (nuevo === viejo){ closeDrawer(); return; }
+  busy(true);
+  let q = sb.from("acciones").update({ [x.level]: nuevo, actualizado: new Date().toISOString(), actualizado_por: me.id }).eq("modulo", raw("modulo", x.m));
+  if (x.level !== "modulo") q = q.eq("grupo", raw("grupo", x.g));
+  if (x.level === "subgrupo") q = q.eq("subgrupo", raw("subgrupo", x.s));
+  const { data, error } = await q.select("id");
+  if (error){ drawer.error = dbErr(error); renderDrawer(); return; }
+  if (!data || !data.length){ drawer.error = "No se ha cambiado nada. Comprueba que tienes permiso de edición."; renderDrawer(); return; }
+  // mantener filtros y desplegables apuntando al nombre nuevo
+  const k = x.level === "modulo" ? "modulo" : x.level === "grupo" ? "grupo" : "subgrupo";
+  st.f[k] = st.f[k].map(v => v === viejo ? nuevo : v);
+  const oldKey = x.level === "modulo" ? "m:"+x.m : x.level === "grupo" ? "g:"+x.m+"|"+x.g : "s:"+x.m+"|"+x.g+"|"+x.s;
+  const newKey = x.level === "modulo" ? "m:"+nuevo : x.level === "grupo" ? "g:"+x.m+"|"+nuevo : "s:"+x.m+"|"+x.g+"|"+nuevo;
+  if (st.col[oldKey]){ delete st.col[oldKey]; st.col[newKey] = true; }
+  saveUi();
+  await loadAcciones(); refresh(); closeDrawer();
+  toast(`Nombre cambiado en ${data.length} ${data.length === 1 ? "actividad" : "actividades"}`);
+}
+
 /* ---------- Ficha de usuario (administradores) ---------- */
 function genPassword(){
   const a = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"; const b = new Uint32Array(10); crypto.getRandomValues(b);
@@ -815,9 +891,19 @@ async function saveUser(){
 }
 
 /* ---------- arranque ---------- */
+/* Acepta la URL del proyecto escrita de cualquier forma habitual y la deja en https://REF.supabase.co */
+function normalizaUrl(u){
+  u = String(u || "").trim();
+  const dash = u.match(/supabase\.com\/dashboard\/project\/([a-z0-9]+)/i);
+  if (dash) return `https://${dash[1].toLowerCase()}.supabase.co`;
+  if (/^[a-z0-9]{15,30}$/i.test(u)) return `https://${u.toLowerCase()}.supabase.co`;
+  if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+  const m = u.match(/^(https?:\/\/[^\/?#\s]+)/i);
+  return m ? m[1] : u;
+}
 async function boot(){
   if (!CFG.SUPABASE_URL || !CFG.SUPABASE_ANON_KEY || /TU-PROYECTO|PEGA_AQUI/.test(CFG.SUPABASE_URL + CFG.SUPABASE_ANON_KEY) || !window.supabase){ showConfigMissing(); return; }
-      sb = window.supabase.createClient((String(CFG.SUPABASE_URL).trim().match(/^https?:\/\/[^\/?#\s]+/i) || [CFG.SUPABASE_URL])[0], String(CFG.SUPABASE_ANON_KEY).trim(), { auth: { persistSession: true, autoRefreshToken: true } });
+  sb = window.supabase.createClient(normalizaUrl(CFG.SUPABASE_URL), String(CFG.SUPABASE_ANON_KEY).trim(), { auth: { persistSession: true, autoRefreshToken: true } });
   buildMs(); bindStatic(); bindView();
   const { data: { session } } = await sb.auth.getSession();
   if (session) await enter(); else showLogin();
