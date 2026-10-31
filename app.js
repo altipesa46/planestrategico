@@ -3,14 +3,15 @@
  */
 (() => {
 "use strict";
-const APP_VERSION = "30.10-c";
+const APP_VERSION = "31.10-a";
 let CFG = window.APP_CONFIG || {};
 const ESTADOS = ["Pendiente","En curso","Standby","Cerrada"];
 const PRIOS = ["Alta","Media","Baja"];
 const MESES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
 const MES3 = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
 const MSKEYS = ["actividad","modulo","grupo","subgrupo","estado","resp","prio"];
-const MSLABEL = {actividad:"Actividad",modulo:"Módulo",grupo:"Grupo",subgrupo:"Sub-grupo",estado:"Estado",resp:"Responsable",prio:"Prioridad"};
+const MSLABEL = {actividad:"Tarea",modulo:"Línea estratégica",grupo:"Acción clave",subgrupo:"Actividad",estado:"Estado",resp:"Responsable",prio:"Prioridad"};
+const ROLNAME = { admin:"Administrador", encargado:"Encargado", usuario:"Usuario" };
 const CHEV = `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -29,7 +30,7 @@ const uniq = arr => [...new Set(arr.filter(Boolean))];
 const newId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36)+Math.random().toString(36).slice(2));
 
 /* ---------- estado ---------- */
-let sb = null, me = null, isAdmin = false, canWrite = false;
+let sb = null, me = null, isAdmin = false, canWrite = false, isEnc = false, canKey = false;
 let rows = [], resps = [], byId = new Map(), respMap = new Map();
 let usuarios = null, usuariosErr = "";
 let cats = [], catsMissing = false, pop = null;
@@ -69,7 +70,7 @@ async function loadPlanes(){
   planes = data; plansMissing = false;
 }
 const withPlan = o => plansMissing ? o : Object.assign({ plan_id: curPlan }, o);
-const CONFLICT = () => plansMissing ? "nivel,modulo,grupo" : "plan_id,nivel,modulo,grupo";
+const CONFLICT = () => (plansMissing ? "" : "plan_id,") + "nivel,modulo,grupo" + (catsV3() ? ",subgrupo" : "");
 const planOf = id => planes.find(p => p.id === id);
 async function loadCats(){
   const { data, error } = await sb.from("categorias").select("*");
@@ -142,6 +143,7 @@ function subscribe(){
 function dbErr(e){
   const m = (e && (e.message || "")) + " " + (e && e.code || "");
   if (/42501|row-level security|permission/i.test(m)) return "No tienes permiso para hacer este cambio.";
+  if (/Tu rol/.test(m)) return (e.message || "").replace(/^.*?(Tu rol)/, "$1");
   if (/fechas_ok/.test(m)) return "El cierre objetivo no puede ser anterior al inicio.";
   if (/categorias/.test(m) && /exist|schema cache|relation/i.test(m)) return "Falta crear la tabla de categorías: ejecuta 20261029000000_categorias.sql en el SQL Editor de Supabase.";
   if (/responsables_area_fk/.test(m)) return "Esa área no existe. Elígela de la lista o créala con «+ Nueva área».";
@@ -224,6 +226,8 @@ async function refreshMe(){
   const { data } = await sb.from("perfiles").select("*").eq("id", user.id).maybeSingle();
   me = data || null;
   isAdmin = !!(me && me.activo && me.rol === "admin");
+  isEnc = !!(me && me.activo && me.rol === "encargado");
+  canKey = isAdmin || isEnc;   // acciones clave y actividades
   canWrite = !!(me && me.activo);
 }
 async function enter(){
@@ -238,7 +242,7 @@ async function enter(){
 async function logout(){ if (channel){ sb.removeChannel(channel); channel = null; } await sb.auth.signOut(); me = null; rows = []; allRows = []; allCats = []; planes = []; curPlan = null; resps = []; usuarios = null; loaded = false; closeDrawer(); showLogin(); }
 function showApp(){
   $("#gate").hidden = true; $("#app").hidden = false;
-  $("#me").innerHTML = me ? `<span><b>${esc(me.nombre || me.usuario)}</b> · ${esc(me.usuario)}</span><span class="role">${me.rol === "admin" ? "Administrador" : "Usuario"}</span>
+  $("#me").innerHTML = me ? `<span><b>${esc(me.nombre || me.usuario)}</b> · ${esc(me.usuario)}</span><span class="role">${ROLNAME[me.rol] || me.rol}</span>
     <button class="btn" id="me-pass">Cambiar contraseña</button><button class="btn" id="me-out">Salir</button>` : "";
   const mp = $("#me-pass"); if (mp) mp.onclick = () => showChangePassword(false);
   const mo = $("#me-out"); if (mo) mo.onclick = logout;
@@ -249,6 +253,7 @@ function showApp(){
 }
 
 /* ---------- modelo ---------- */
+const SIN = { modulo:"Sin línea estratégica", grupo:"Sin acción clave", subgrupo:"Sin actividad" };
 const isTop = r => !r.padre || !byId.has(r.padre);
 const parentOf = r => r.padre ? byId.get(r.padre) : null;
 function eff(r){ const p = parentOf(r) || r; return { modulo:p.modulo||"", grupo:p.grupo||"", subgrupo:p.subgrupo||"", nombre:p.actividad||"" }; }
@@ -292,32 +297,44 @@ function visibleTops(){
   }
   return out;
 }
-/* Orden de visualización de líneas estratégicas (módulos) y grupos */
-const catRow = (level, m, g) => cats.find(c => c.nivel === level && c.modulo === m && (level === "modulo" || c.grupo === g));
-const catOrd = (level, m, g) => { const c = catRow(level, m, g); return c && c.orden != null ? c.orden : null; };
-function nextOrd(level, m){
-  const os = cats.filter(c => c.nivel === level && (level === "modulo" || c.modulo === m)).map(c => c.orden || 0);
+/* Estructura: 1 línea estratégica (modulo) · 2 acción clave (grupo) · 3 actividad (subgrupo) */
+const catsV3 = () => !allCats.length || Object.prototype.hasOwnProperty.call(allCats[0], "subgrupo");
+const catRow = (level, m, g, s) => cats.find(c => c.nivel === level && c.modulo === m && (level === "modulo" || c.grupo === g) && (level !== "subgrupo" || (c.subgrupo || "") === s));
+const catOrd = (level, m, g, s) => { const c = catRow(level, m, g, s); return c && c.orden != null ? c.orden : null; };
+function nextOrd(level, m, g){
+  const os = cats.filter(c => c.nivel === level && (level === "modulo" || c.modulo === m) && (level !== "subgrupo" || c.grupo === g)).map(c => c.orden || 0);
   return (os.length ? Math.max(...os) : 0) + 1;
+}
+function catObj(level, m, g, s, orden){
+  const o = withPlan({ nivel: level, modulo: m, grupo: level === "modulo" ? "" : g, orden });
+  if (catsV3()) o.subgrupo = level === "subgrupo" ? s : "";
+  return o;
 }
 const noFilters = () => MSKEYS.every(k => !st.f[k].length) && !st.f.desde && !st.f.hasta && !st.f.fechas;
 function groupTree(entries, withEmpty){
   const tree = new Map(), first = new Map(); let i = 0;
-  const add = (m, g) => {
+  const add = (m, g, s) => {
     if (!tree.has(m)){ tree.set(m, new Map()); first.set("m:"+m, i++); }
-    if (g != null){ const gm = tree.get(m); if (!gm.has(g)){ gm.set(g, new Map()); first.set("g:"+m+"|"+g, i++); } }
+    if (g == null) return;
+    const gm = tree.get(m); if (!gm.has(g)){ gm.set(g, new Map()); first.set("g:"+m+"|"+g, i++); }
+    if (s == null) return;
+    const sm = gm.get(g); if (!sm.has(s)){ sm.set(s, []); first.set("s:"+m+"|"+g+"|"+s, i++); }
   };
   for (const en of entries){
-    const r = en.r, m = r.modulo || "Sin módulo", g = r.grupo || "Sin grupo", s = r.subgrupo || "Sin sub-grupo";
-    add(m, g);
-    const sm = tree.get(m).get(g); if (!sm.has(s)) sm.set(s, []);
-    sm.get(s).push(en);
+    const r = en.r, m = r.modulo || SIN.modulo, g = r.grupo || SIN.grupo, s = r.subgrupo || SIN.subgrupo;
+    add(m, g, s);
+    tree.get(m).get(g).get(s).push(en);
   }
-  if (withEmpty) for (const c of cats){ if (c.nivel === "modulo") add(c.modulo, null); else add(c.modulo, c.grupo); }
+  if (withEmpty) for (const c of cats){
+    if (c.nivel === "modulo") add(c.modulo, null); else if (c.nivel === "grupo") add(c.modulo, c.grupo); else add(c.modulo, c.grupo, c.subgrupo);
+  }
   const key = (o, f) => o != null ? o : 1e6 + (f || 0);
   const mk = m => key(catOrd("modulo", m), first.get("m:"+m));
   const gk = (m, g) => key(catOrd("grupo", m, g), first.get("g:"+m+"|"+g));
+  const sk = (m, g, s) => key(catOrd("subgrupo", m, g, s), first.get("s:"+m+"|"+g+"|"+s));
   return new Map([...tree.entries()].sort((a,b) => mk(a[0]) - mk(b[0]))
-    .map(([m, gm]) => [m, new Map([...gm.entries()].sort((a,b) => gk(m,a[0]) - gk(m,b[0])))]));
+    .map(([m, gm]) => [m, new Map([...gm.entries()].sort((a,b) => gk(m,a[0]) - gk(m,b[0]))
+      .map(([g, sm]) => [g, new Map([...sm.entries()].sort((a,b) => sk(m,g,a[0]) - sk(m,g,b[0])))]))]));
 }
 
 /* ---------- filtros multi-selección ---------- */
@@ -328,12 +345,13 @@ function optionsFor(key){
   if (UPS[key]){
     const src = sorted(rows.filter(isTop)).filter(r => UPS[key].every(u => !st.f[u].length || st.f[u].includes(valueOf(r,u))));
     vals = uniq(src.map(r => valueOf(r,key)));
-    if (key === "modulo" || key === "grupo"){
+    if (key === "modulo" || key === "grupo" || key === "subgrupo"){
       const t = groupTree(src.map(r => ({ r })), false);
-      const ordered = key === "modulo" ? [...t.keys()] : uniq([...t.values()].flatMap(gm => [...gm.keys()]));
+      const ordered = key === "modulo" ? [...t.keys()] : key === "grupo" ? uniq([...t.values()].flatMap(gm => [...gm.keys()]))
+        : uniq([...t.values()].flatMap(gm => [...gm.values()].flatMap(sm => [...sm.keys()])));
       vals = ordered.filter(v => vals.includes(v)).concat(vals.filter(v => !ordered.includes(v)));
     }
-    if (key === "actividad") for (const r of src){ const h = r.subgrupo || ""; hints[r.actividad] = hints[r.actividad] && hints[r.actividad] !== h ? "Varios sub-grupos" : h; }
+    if (key === "actividad") for (const r of src){ const h = r.subgrupo || ""; hints[r.actividad] = hints[r.actividad] && hints[r.actividad] !== h ? "Varias actividades" : h; }
   }
   else if (key === "estado") vals = ESTADOS;
   else if (key === "prio") vals = PRIOS.concat(["(sin)"]);
@@ -360,7 +378,7 @@ function buildMs(){
     host.innerHTML = `<span class="lbl" id="lbl-${key}">${MSLABEL[key]}</span>
       <button type="button" class="ms-btn" id="msb-${key}" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="lbl-${key} msb-${key}"><span class="v"></span><span class="caret">▼</span></button>
       <div class="ms-pop" hidden>
-        <input class="ms-q" id="msq-${key}" type="search" placeholder="${key==="actividad"?"Escribe para buscar actividades…":"Buscar…"}" autocomplete="off">
+        <input class="ms-q" id="msq-${key}" type="search" placeholder="${key==="actividad"?"Escribe para buscar tareas…":"Buscar…"}" autocomplete="off">
         <div class="ms-tools"><button type="button" class="btn link" data-msall>Seleccionar visibles</button><button type="button" class="btn link" data-msnone>Quitar selección</button></div>
         <div class="ms-list" role="listbox" aria-multiselectable="true"></div>
       </div>`;
@@ -443,16 +461,16 @@ function bindStatic(){
 }
 function renderSummary(){
   const vis = visibleTops(), nk = vis.reduce((a,e)=>a+e.kids.length,0), total = rows.filter(isTop).length;
-  let msg = loaded ? `Mostrando ${vis.length} de ${total} actividades${nk?` · ${nk} subtareas`:""}` : "";
+  let msg = loaded ? `Mostrando ${vis.length} de ${total} tareas${nk?` · ${nk} subtareas`:""}` : "";
   if (st.view === "responsables") msg = loaded ? `${resps.length} responsables registrados` : "";
   if (st.view === "usuarios") msg = usuarios ? `${usuarios.length} usuarios` : "";
   if (!canWrite) msg += (msg?" · ":"") + "Solo lectura";
   $("#fsummary").textContent = msg;
   const addOk = st.view === "usuarios" ? isAdmin : canWrite;
   $("#add").hidden = !addOk || !loaded;
-  $("#add").textContent = st.view === "responsables" ? "+ Nuevo responsable" : st.view === "usuarios" ? "+ Nuevo usuario" : "+ Nueva actividad";
+  $("#add").textContent = st.view === "responsables" ? "+ Nuevo responsable" : st.view === "usuarios" ? "+ Nuevo usuario" : "+ Nueva tarea";
   $("#treeacts").hidden = st.view !== "lista";
-  $("#newline").hidden = !canWrite;
+  $("#newline").hidden = !isAdmin;
   const noFilters = ["responsables","usuarios"].includes(st.view);
   $("#filters").style.opacity = noFilters ? ".45" : "";
   const inPlan = !!curPlan || plansMissing, home = loaded && !plansMissing && !curPlan && !adminMode;
@@ -471,8 +489,8 @@ function statsHtml(entries, short){
   const late = tops.filter(isOverdue).length + entries.reduce((a,e)=>a+e.kids.filter(isOverdue).length,0);
   const ks = entries.reduce((a,e)=>a+e.kids.length,0);
   const pct = n ? Math.round(cerr*100/n) : 0;
-  if (short) return `${n} actividades · ${cur} en curso · ${cerr} cerradas${late?` · <span class="late">${late} vencidas</span>`:""}${ks?` · ${ks} subtareas`:""}`;
-  return `<span><b>${n}</b> actividades</span><span><b>${cur}</b> en curso</span><span><b>${cerr}</b> cerradas</span>${late?`<span class="bad"><b>${late}</b> vencidas</span>`:""}${ks?`<span><b>${ks}</b> subtareas</span>`:""}<span class="minibar" title="${pct}% cerradas"><i style="width:${pct}%"></i></span><span class="mono">${pct}%</span>`;
+  if (short) return `${n} ${n === 1 ? "tarea" : "tareas"} · ${cur} en curso · ${cerr} cerradas${late?` · <span class="late">${late} vencidas</span>`:""}${ks?` · ${ks} subtareas`:""}`;
+  return `<span><b>${n}</b> ${n === 1 ? "tarea" : "tareas"}</span><span><b>${cur}</b> en curso</span><span><b>${cerr}</b> cerradas</span>${late?`<span class="bad"><b>${late}</b> vencidas</span>`:""}${ks?`<span><b>${ks}</b> subtareas</span>`:""}<span class="minibar" title="${pct}% cerradas"><i style="width:${pct}%"></i></span><span class="mono">${pct}%</span>`;
 }
 function whoHtml(r){ const p = splitResp(r.responsable); return p.length ? p.map(x=>`<span class="who" title="${esc(respLabel(x))}">${esc(x)}</span>`).join("") : `<span class="muted" style="font-size:12px">Sin asignar</span>`; }
 function dueHtml(r){
@@ -481,9 +499,10 @@ function dueHtml(r){
   if (r.estado !== "Cerrada"){ const d = diffDays(today, r.fin); sub = d < 0 ? `<small class="late">${-d} d de retraso</small>` : d === 0 ? `<small>hoy</small>` : `<small>en ${d} d</small>`; }
   return `<span class="mono ${isOverdue(r)?"late":""}">${fmt(r.fin)}</span>${sub}`;
 }
-const LVNAME = { modulo:"módulo", grupo:"grupo", subgrupo:"sub-grupo" };
-const renBtn = (level, m, g, s) => canWrite ? `<button class="ren" data-ren='${esc(JSON.stringify({level,m,g,s}))}' title="${level === "subgrupo" ? "Cambiar nombre" : "Cambiar nombre u orden"}" aria-label="Editar ${LVNAME[level]} ${LVNAME[level]} ${esc(level==="modulo"?m:level==="grupo"?g:s)}"><svg width="11" height="11" viewBox="0 0 16 16" aria-hidden="true"><path d="M11.3 2.3a1.5 1.5 0 0 1 2.1 2.1L5.6 12.2 2.5 13l.8-3.1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>` : "";
-const addLv = (label, attr, json) => canWrite ? `<button class="addlv" ${attr}='${esc(JSON.stringify(json))}'>${label}</button>` : "";
+const LVNAME = { modulo:"línea estratégica", grupo:"acción clave", subgrupo:"actividad" };
+const canLevel = level => level === "modulo" ? isAdmin : canKey;
+const renBtn = (level, m, g, s) => canLevel(level) ? `<button class="ren" data-ren='${esc(JSON.stringify({level,m,g,s}))}' title="Cambiar nombre u orden" aria-label="Editar ${LVNAME[level]} ${esc(level==="modulo"?m:level==="grupo"?g:s)}"><svg width="11" height="11" viewBox="0 0 16 16" aria-hidden="true"><path d="M11.3 2.3a1.5 1.5 0 0 1 2.1 2.1L5.6 12.2 2.5 13l.8-3.1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>` : "";
+const addLv = (label, attr, json, ok) => (ok ?? canWrite) ? `<button class="addlv" ${attr}='${esc(JSON.stringify(json))}'>${label}</button>` : "";
 const chevBtn = key => `<button class="chev" data-tog="${esc(key)}" aria-expanded="${!st.col[key]}" aria-label="${st.col[key]?"Desplegar":"Plegar"}">${CHEV}</button>`;
 function rowHtml(r, ind, o){
   o = o || {};
@@ -503,21 +522,22 @@ function renderLista(){
   let h = `<div class="tree">`;
   for (const [m, gm] of groupTree(vis, withEmpty)){
     const km = "m:"+m, mAll = [...gm.values()].flatMap(sm => [...sm.values()].flat());
-    h += `<div class="lv lv0" data-tog="${esc(km)}"><span class="nm">${chevBtn(km)}<b>${esc(m)}</b>${renBtn("modulo",m,"","")}${addLv("+ Grupo","data-newcat",{level:"grupo",m})}</span><span class="sts">${mAll.length ? statsHtml(mAll) : "Sin actividades todavía"}</span></div>`;
+    h += `<div class="lv lv0" data-tog="${esc(km)}"><span class="nm">${chevBtn(km)}<b>${esc(m)}</b>${renBtn("modulo",m,"","")}${addLv("+ Acción clave","data-newcat",{level:"grupo",m},canKey)}</span><span class="sts">${mAll.length ? statsHtml(mAll) : "Sin tareas todavía"}</span></div>`;
     if (st.col[km]) continue;
-    if (!gm.size) h += `<div class="emptyrow">Esta línea estratégica aún no tiene grupos.${addLv("+ Añadir grupo","data-newcat",{level:"grupo",m})}</div>`;
+    if (!gm.size) h += `<div class="emptyrow">Esta línea estratégica aún no tiene acciones clave.${addLv("+ Añadir acción clave","data-newcat",{level:"grupo",m},canKey)}</div>`;
     for (const [g, sm] of gm){
       const kg = "g:"+m+"|"+g, gAll = [...sm.values()].flat();
-      h += `<div class="lv lv1" data-tog="${esc(kg)}"><span class="nm">${chevBtn(kg)}<b>${esc(g)}</b>${renBtn("grupo",m,g,"")}${addLv("+ Actividad","data-add",{modulo:m,grupo:g,subgrupo:""})}</span><span class="sts">${gAll.length ? statsHtml(gAll) : "Sin actividades todavía"}</span></div>`;
+      h += `<div class="lv lv1" data-tog="${esc(kg)}"><span class="nm">${chevBtn(kg)}<b>${esc(g)}</b>${renBtn("grupo",m,g,"")}${addLv("+ Actividad","data-newcat",{level:"subgrupo",m,g},canKey)}</span><span class="sts">${gAll.length ? statsHtml(gAll) : "Sin tareas todavía"}</span></div>`;
       if (st.col[kg]) continue;
-      if (!sm.size) h += `<div class="emptyrow">Este grupo aún no tiene actividades.${addLv("+ Añadir actividad","data-add",{modulo:m,grupo:g,subgrupo:""})}</div>`;
+      if (!sm.size) h += `<div class="emptyrow">Esta acción clave aún no tiene actividades.${addLv("+ Añadir actividad","data-newcat",{level:"subgrupo",m,g},canKey)}</div>`;
       for (const [s, items] of sm){
         const ks = "s:"+m+"|"+g+"|"+s, closed = !!st.col[ks];
         h += `<div class="sh" data-tog="${esc(ks)}">
-          <div class="shn">${chevBtn(ks)}<b>${esc(s)}</b>${renBtn("subgrupo",m,g,s)}${canWrite?`<button class="btn small" data-add='${esc(JSON.stringify({modulo:m,grupo:g,subgrupo:s}))}'>+ Añadir</button>`:""}<span class="shs">${statsHtml(items, true)}</span></div>
+          <div class="shn">${chevBtn(ks)}<b>${esc(s)}</b>${renBtn("subgrupo",m,g,s)}${canWrite && s !== SIN.subgrupo ? `<button class="btn small" data-add='${esc(JSON.stringify({modulo:m,grupo:g,subgrupo:s,ctx:true}))}'>+ Tarea</button>`:""}<span class="shs">${items.length ? statsHtml(items, true) : "Sin tareas todavía"}</span></div>
           ${closed ? "" : `<span class="hc">Responsable</span><span class="hc">Estado</span><span class="hc">Prioridad</span><span class="hc">Inicio</span><span class="hc">Cierre objetivo</span>`}
         </div>`;
         if (closed) continue;
+        if (!items.length) h += `<div class="emptyrow">Esta actividad aún no tiene tareas.${canWrite ? `<button class="addlv" data-add='${esc(JSON.stringify({modulo:m,grupo:g,subgrupo:s,ctx:true}))}'>+ Añadir tarea</button>` : ""}</div>`;
         for (const en of items){
           h += rowHtml(en.r, 0, { all: en.all, ctx: en.ctx });
           if (en.all.length && !st.col["a:"+en.r.id]) for (const kd of en.kids) h += rowHtml(kd, 1, { kid:true });
@@ -562,7 +582,7 @@ function renderCal(){
   h += `</div></div>`;
   const undated = list.filter(r => !r.inicio && !r.fin).length;
   h += `<div class="legend">${ESTADOS.map(e=>`<span class="pill ${stClass(e)}">${e}</span>`).join("")}<span>Borde rojo: vencida · ↳ subtarea</span>${undated?`<span>· ${undated} sin fechas no aparecen</span>`:""}</div>`;
-  if (!dated.length) h = `<div class="note" style="margin-bottom:12px">Ninguna actividad filtrada tiene fechas todavía. Abre una actividad y pon su fecha de inicio y de cierre objetivo para verla aquí.</div>` + h;
+  if (!dated.length) h = `<div class="note" style="margin-bottom:12px">Ninguna tarea filtrada tiene fechas todavía. Abre una tarea y pon su fecha de inicio y de cierre objetivo para verla aquí.</div>` + h;
   return h;
 }
 
@@ -570,7 +590,7 @@ function renderCal(){
 function span(r){ let s=r.inicio||r.fin, e=r.fin||r.inicio; if(e<s)[s,e]=[e,s]; return {s,e}; }
 function renderGantt(){
   const vis = visibleTops().map(en => ({...en, dk: en.kids.filter(k=>k.inicio||k.fin), dated: !en.ctx && (en.r.inicio||en.r.fin)})).filter(en => en.dated || en.dk.length);
-  if (!vis.length) return `<div class="note">Ninguna actividad filtrada tiene fechas todavía. Al añadir fecha de inicio y cierre objetivo, aparecerán aquí como barras en el tiempo.</div>`;
+  if (!vis.length) return `<div class="note">Ninguna tarea filtrada tiene fechas todavía. Al añadir fecha de inicio y cierre objetivo, aparecerán aquí como barras en el tiempo.</div>`;
   const all = vis.flatMap(en => (en.dated?[en.r]:[]).concat(en.dk)).map(span);
   let lo = st.f.desde || all.reduce((m,x)=>x.s<m?x.s:m, all[0].s);
   let hi = st.f.hasta || all.reduce((m,x)=>x.e>m?x.e:m, all[0].e);
@@ -589,7 +609,7 @@ function renderGantt(){
   const tl = today >= r0 && today < r1 ? `<div class="gtoday" style="left:${pct(today)}%"></div>` : "";
   const bar = r => { const x = span(r), a = pct(x.s), b = pct(addDays(x.e,1)); return `<div class="gbar ${stClass(r.estado)} ${isOverdue(r)?"overdue":""}" tabindex="0" data-id="${esc(r.id)}" style="left:${a}%;width:${Math.max(b-a,.4)}%" title="${esc(nameOf(r))} · ${fmt(x.s)} → ${fmt(x.e)} · ${esc(r.estado||"Pendiente")}"></div>`; };
   const who = r => splitResp(r.responsable).map(p=>`<span class="who">${esc(p)}</span>`).join("");
-  let h = `<div class="gscroll"><div class="gantt"><div class="grow hdr"><div class="glabel"><b>Actividad</b></div><div class="gtrack">${months}${tl}</div></div>`;
+  let h = `<div class="gscroll"><div class="gantt"><div class="grow hdr"><div class="glabel"><b>Tarea</b></div><div class="gtrack">${months}${tl}</div></div>`;
   for (const [m,gm] of groupTree(vis)) for (const [g,sm] of gm) for (const [s,items] of sm){
     h += `<div class="grow sec"><div class="glabel">${esc(m)} › ${esc(g)} › ${esc(s)}</div><div class="gtrack">${lines}${tl}</div></div>`;
     for (const en of items){
@@ -611,13 +631,13 @@ function renderResp(){
   if (!isAdmin && canWrite) h += `<p class="muted" style="font-size:13px;margin:-4px 0 12px">Puedes dar de alta responsables y áreas. Modificar o eliminar los existentes es cosa de los administradores.</p>`;
   const an = areaNames();
   h += `<div class="areas"><span class="lbl">Áreas / departamentos</span>${an.map(a => { const n = resps.filter(p => p.area === a).length; return isAdmin && !areasMissing ? `<button class="achip poptrig" data-area="${esc(a)}" title="Renombrar o eliminar">${esc(a)} <span class="mono">${n}</span></button>` : `<span class="achip">${esc(a)} <span class="mono">${n}</span></span>`; }).join("")}${canWrite && !areasMissing ? `<button class="achip add poptrig" data-newarea>+ Área</button>` : ""}${!an.length ? `<span class="muted" style="font-size:13px">Aún no hay áreas.</span>` : ""}</div>`;
-  if (!list.length && !orphan.length) return h + `<div class="note">Aún no hay responsables. Añade a cada persona con un código corto (p. ej. JM) para poder asignarla a actividades.</div>`;
+  if (!list.length && !orphan.length) return h + `<div class="note">Aún no hay responsables. Añade a cada persona con un código corto (p. ej. JM) para poder asignarla a tareas.</div>`;
   h += `<div class="tscroll"><table class="rt"><thead><tr><th>Código</th><th>Nombre</th><th class="c-area">Área / departamento</th><th class="c-mail">Email</th><th class="num">Abiertas</th><th class="num c-venc">Vencidas</th><th class="c-est">Estado</th><th></th></tr></thead><tbody>`;
   for (const p of list){
     const o = open(p.id), l = late(p.id);
-    h += `<tr data-resp="${esc(p.id)}" class="${p.activo===false?"off":""}" tabindex="0"><td><span class="who">${esc(p.id)}</span></td><td>${esc(p.nombre||"—")}</td><td class="c-area">${esc(p.area||"—")}</td><td class="c-mail">${esc(p.email||"—")}</td><td class="num">${o}</td><td class="num c-venc ${l?"late":""}">${l}</td><td class="c-est">${p.activo===false?"Inactivo":"Activo"}</td><td><button class="btn small" data-seeresp="${esc(p.id)}">Ver actividades</button></td></tr>`;
+    h += `<tr data-resp="${esc(p.id)}" class="${p.activo===false?"off":""}" tabindex="0"><td><span class="who">${esc(p.id)}</span></td><td>${esc(p.nombre||"—")}</td><td class="c-area">${esc(p.area||"—")}</td><td class="c-mail">${esc(p.email||"—")}</td><td class="num">${o}</td><td class="num c-venc ${l?"late":""}">${l}</td><td class="c-est">${p.activo===false?"Inactivo":"Activo"}</td><td><button class="btn small" data-seeresp="${esc(p.id)}">Ver tareas</button></td></tr>`;
   }
-  for (const c of orphan) h += `<tr data-orphan="${esc(c)}" tabindex="0"><td><span class="who">${esc(c)}</span></td><td colspan="6" class="muted">Código usado en actividades pero no registrado.${canWrite?" Pulsa para darlo de alta.":""}</td><td></td></tr>`;
+  for (const c of orphan) h += `<tr data-orphan="${esc(c)}" tabindex="0"><td><span class="who">${esc(c)}</span></td><td colspan="6" class="muted">Código usado en tareas pero no registrado.${canWrite?" Pulsa para darlo de alta.":""}</td><td></td></tr>`;
   return h + `</tbody></table></div>`;
 }
 
@@ -629,12 +649,12 @@ function renderUsers(){
   if (!usuarios) return h + `<div class="note">Cargando usuarios…</div>`;
   if (!usuarios.length) return h + `<div class="note">No hay usuarios todavía.</div>`;
   h += `<div class="tscroll"><table class="rt"><thead><tr><th>Usuario</th><th>Nombre</th><th>Responsable</th><th class="c-rol2">Rol</th><th class="c-est">Estado</th><th class="c-acc">Último acceso</th><th></th></tr></thead><tbody>`;
-  const list = usuarios.slice().sort((a,b)=> (a.rol!=="admin")-(b.rol!=="admin") || a.usuario.localeCompare(b.usuario));
+  const list = usuarios.slice().sort((a,b)=> (["admin","encargado","usuario"].indexOf(a.rol))-(["admin","encargado","usuario"].indexOf(b.rol)) || a.usuario.localeCompare(b.usuario));
   for (const u of list){
     h += `<tr data-user="${esc(u.id)}" class="${u.activo?"":"off"}" tabindex="0">
       <td class="mono">${esc(u.usuario)}${u.id===me.id?' <span class="muted" style="font-family:var(--f-body)">(tú)</span>':""}</td><td>${esc(u.nombre||"—")}</td>
       <td>${u.responsable?`<span class="who">${esc(u.responsable)}</span>`:"—"}</td>
-      <td class="c-rol2"><span class="badge role-${u.rol}">${u.rol==="admin"?"Administrador":"Usuario"}</span></td>
+      <td class="c-rol2"><span class="badge role-${u.rol}">${ROLNAME[u.rol] || u.rol}</span></td>
       <td class="c-est">${u.activo?(u.cambiar_password?"Pendiente de cambiar contraseña":"Activo"):"Desactivado"}</td>
       <td class="c-acc mono" style="font-size:12.5px">${esc(fmtTs(u.ultimo_acceso))}</td>
       <td><button class="btn small" data-userpass="${esc(u.id)}">Contraseña</button></td></tr>`;
@@ -642,17 +662,17 @@ function renderUsers(){
   return h + `</tbody></table></div>`;
 }
 
-function emptyFiltered(){ return `<div class="empty"><h2>Ninguna actividad coincide</h2><p>Cambia o limpia los filtros para ver más resultados.</p></div>`; }
+function emptyFiltered(){ return `<div class="empty"><h2>Ninguna tarea coincide</h2><p>Cambia o limpia los filtros para ver más resultados.</p></div>`; }
 function renderView(){
   const v = $("#view");
   renderHeader();
   if (loaded && !plansMissing && !curPlan && !adminMode){ v.innerHTML = renderHome(); return; }
   document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.view === st.view)));
-  if (!loaded){ v.innerHTML = `<div class="empty"><h2>Cargando actividades…</h2><p>Las acciones del plan estratégico aparecerán aquí agrupadas por módulo, grupo y sub-grupo.</p></div>`; return; }
+  if (!loaded){ v.innerHTML = `<div class="empty"><h2>Cargando tareas…</h2><p>Las acciones del plan estratégico aparecerán aquí agrupadas por línea estratégica, acción clave y actividad.</p></div>`; return; }
   if (st.view === "responsables"){ v.innerHTML = renderResp(); return; }
   if (st.view === "usuarios"){ v.innerHTML = renderUsers(); return; }
   if (!curPlan && !plansMissing){ st.view = "responsables"; v.innerHTML = renderResp(); return; }
-  if (!rows.length && !cats.length){ v.innerHTML = `<div class="empty"><h2>Este plan está vacío</h2><p>Empieza por crear sus líneas estratégicas. Dentro de cada una podrás añadir grupos, sub-grupos y acciones.</p>${canWrite?`<p><button class="btn primary" id="first-line">+ Primera línea estratégica</button></p>`:""}</div>`; const fl = $("#first-line"); if (fl) fl.onclick = e => openCatPop({ mode:"new", level:"modulo" }, e.currentTarget); return; }
+  if (!rows.length && !cats.length){ v.innerHTML = `<div class="empty"><h2>Este plan está vacío</h2><p>Empieza por crear sus líneas estratégicas. Dentro de cada una podrás añadir acciones clave, actividades y tareas.</p>${isAdmin?`<p><button class="btn primary" id="first-line">+ Primera línea estratégica</button></p>`:`<p>Un administrador debe crear antes las líneas estratégicas.</p>`}</div>`; const fl = $("#first-line"); if (fl) fl.onclick = e => openCatPop({ mode:"new", level:"modulo" }, e.currentTarget); return; }
   v.innerHTML = st.view === "calendario" ? renderCal() : st.view === "cronograma" ? renderGantt() : renderLista();
 }
 function render(){ renderFilterLabels(); renderSummary(); renderView(); }
@@ -707,7 +727,7 @@ function openDrawer(id, preset){
   d.sel = splitResp(d.responsable);
   drawer = { kind:"act", id, draft: d, confirmDel:false, error:"", nota:"" };
   renderDrawer();
-  setTimeout(()=>{ const f = document.querySelector(id ? "#d-estado" : (d.modulo ? "#d-actividad" : "#d-modulo")); f && f.focus(); }, 30);
+  setTimeout(()=>{ const f = document.querySelector(id ? "#d-estado" : (d.subgrupo ? "#d-actividad" : "#d-modulo")); f && f.focus(); }, 30);
 }
 function openResp(id, code){
   const p = id ? respMap.get(id) : null;
@@ -729,22 +749,27 @@ function renderDrawer(){
   if (drawer.kind === "plan") return renderPlanDrawer();
   const d = drawer.draft, ro = !canWrite, isSub = !!d.padre, parent = isSub ? byId.get(d.padre) : null;
   const dis = ro ? "disabled" : "";
-  const dl = (id, vals) => `<datalist id="${id}">${vals.map(v=>`<option value="${esc(v)}"></option>`).join("")}</datalist>`;
-  const tops = rows.filter(isTop);
+  // Ubicación de la tarea: fija si se crea desde una actividad o si el rol no permite moverla
+  const isNewTask = !drawer.id && !isSub;
+  const canMove = !ro && !isSub && (isNewTask ? !d.ctx : canKey);
+  const lineFixed = !isNewTask && !isAdmin;   // los encargados no cambian la línea estratégica
+  const selOpts = (vals, cur, ph) => `<option value="">${ph}</option>` + uniq(vals.concat(cur ? [cur] : [])).map(v => `<option ${v === cur ? "selected" : ""}>${esc(v)}</option>`).join("");
+  const ubic = isSub ? "" : canMove ? `
+      <div class="fld full"><label for="d-modulo">Línea estratégica</label><select id="d-modulo" ${lineFixed ? "disabled" : ""}>${selOpts(orderedNames("modulo"), d.modulo, "Elige la línea estratégica…")}</select></div>
+      <div class="fld"><label for="d-grupo">Acción clave</label><select id="d-grupo" ${d.modulo ? "" : "disabled"}>${selOpts(orderedNames("grupo", d.modulo), d.grupo, "Elige…")}</select></div>
+      <div class="fld"><label for="d-subgrupo">Actividad</label><select id="d-subgrupo" ${d.grupo ? "" : "disabled"}>${selOpts(orderedNames("subgrupo", d.modulo, d.grupo), d.subgrupo, "Elige…")}</select></div>` : "";
   const hist = (byId.get(drawer.id)?.historial || []).slice().reverse();
   const opt = (vals, cur, blank) => (blank?`<option value="">${blank}</option>`:"") + vals.map(v=>`<option ${v===cur?"selected":""}>${esc(v)}</option>`).join("");
   const respCodes = uniq(resps.filter(p=>p.activo!==false).sort((a,b)=>(a.orden??999)-(b.orden??999)||a.id.localeCompare(b.id)).map(p=>p.id).concat(d.sel));
   const kids = drawer.id && !isSub ? kidsOf(drawer.id) : [];
-  const title = drawer.id ? (isSub ? "Subtarea" : "Actividad") : (isSub ? "Nueva subtarea" : "Nueva actividad");
+  const title = drawer.id ? (isSub ? "Subtarea" : "Tarea") : (isSub ? "Nueva subtarea" : "Nueva tarea");
   $("#drawer-root").innerHTML = `<div class="scrim" id="scrim"></div>
   <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title">
     <div class="dhead"><h2 id="d-title">${title}</h2><button class="btn" id="d-close" aria-label="Cerrar">✕</button></div>
-    <div class="crumb">${esc([d.modulo,d.grupo,d.subgrupo].filter(Boolean).join(" › "))}${parent?` › <button class="btn link" id="d-parent">${esc(parent.actividad)}</button>`:""}</div>
+    <div class="crumb">${d.modulo || d.grupo || d.subgrupo ? `<span title="Línea estratégica › Acción clave › Actividad">${esc([d.modulo,d.grupo,d.subgrupo].filter(Boolean).join(" › "))}</span>` : `<span>Elige dónde va la tarea</span>`}${parent?` › <button class="btn link" id="d-parent">${esc(parent.actividad)}</button>`:""}</div>
     <form class="dbody" id="d-form">
-      ${isSub ? "" : `<div class="fld full"><label for="d-modulo">Módulo</label><input id="d-modulo" list="dl-mod" value="${esc(d.modulo)}" ${dis}></div>
-      <div class="fld"><label for="d-grupo">Grupo</label><input id="d-grupo" list="dl-grp" value="${esc(d.grupo)}" ${dis}></div>
-      <div class="fld"><label for="d-subgrupo">Sub-grupo</label><input id="d-subgrupo" list="dl-sub" value="${esc(d.subgrupo)}" ${dis}></div>`}
-      <div class="fld full"><label for="d-actividad">${isSub?"Subtarea":"Actividad"}</label><textarea id="d-actividad" rows="2" ${dis}>${esc(d.actividad)}</textarea></div>
+      ${ubic}
+      <div class="fld full"><label for="d-actividad">${isSub?"Subtarea":"Tarea"}</label><textarea id="d-actividad" rows="2" ${dis}>${esc(d.actividad)}</textarea></div>
       <div class="fld"><label for="d-estado">Estado</label><select id="d-estado" ${dis}>${opt(ESTADOS, d.estado||"Pendiente")}</select></div>
       <div class="fld"><label for="d-prioridad">Prioridad</label><select id="d-prioridad" ${dis}>${opt(PRIOS, d.prioridad, "Sin prioridad")}</select></div>
       <div class="fld full"><span class="lbl">Responsable(s)</span>
@@ -754,10 +779,9 @@ function renderDrawer(){
       <div class="fld"><label for="d-fin">Fecha objetivo de cierre</label><input id="d-fin" type="date" value="${esc(d.fin)}" ${dis}></div>
       <div class="fld full"><label for="d-notas">Notas / descripción</label><textarea id="d-notas" rows="3" ${dis}>${esc(d.notas)}</textarea></div>
       ${drawer.id && !isSub ? `<div class="full"><div class="sect"><span>Subtareas (${kids.length})</span>${ro?"":`<button type="button" class="btn small" id="d-addsub">+ Añadir subtarea</button>`}</div>
-        ${kids.length ? `<div class="kids">${kids.map(k=>`<button type="button" class="kidbtn" data-kid="${esc(k.id)}"><span class="pill ${stClass(k.estado)}">${esc(k.estado||"Pendiente")}</span><span>${esc(k.actividad)}</span><span>${splitResp(k.responsable).map(x=>`<span class="who">${esc(x)}</span>`).join("")}</span><span class="mono ${isOverdue(k)?"late":""}" style="font-size:12px">${fmt(k.fin)}</span></button>`).join("")}</div>` : `<p class="muted" style="font-size:13px;margin:0">Divide la actividad en pasos con su propio responsable y fechas.</p>`}</div>` : ""}
+        ${kids.length ? `<div class="kids">${kids.map(k=>`<button type="button" class="kidbtn" data-kid="${esc(k.id)}"><span class="pill ${stClass(k.estado)}">${esc(k.estado||"Pendiente")}</span><span>${esc(k.actividad)}</span><span>${splitResp(k.responsable).map(x=>`<span class="who">${esc(x)}</span>`).join("")}</span><span class="mono ${isOverdue(k)?"late":""}" style="font-size:12px">${fmt(k.fin)}</span></button>`).join("")}</div>` : `<p class="muted" style="font-size:13px;margin:0">Divide la tarea en pasos con su propio responsable y fechas.</p>`}</div>` : ""}
       ${drawer.id && !ro ? `<div class="fld full"><label for="d-nota">Añadir nota de seguimiento</label><textarea id="d-nota" rows="2" placeholder="Qué se ha hecho, bloqueos, próximos pasos…">${esc(drawer.nota)}</textarea></div>`:""}
       ${drawer.id ? `<div class="full"><div class="sect"><span>Historial de seguimiento</span></div>${hist.length?`<ul class="hist">${hist.map(h=>`<li><div class="h"><span class="mono">${esc(fmtTs(h.t))}</span> · ${esc(h.autor || "Importado")}</div>${esc(h.texto)}</li>`).join("")}</ul>`:`<p class="muted" style="font-size:13px;margin:0">Sin anotaciones todavía.</p>`}</div>`:""}
-      ${dl("dl-mod", uniq(sorted(tops).map(r=>r.modulo)))}${dl("dl-grp", uniq(sorted(tops).map(r=>r.grupo)))}${dl("dl-sub", uniq(sorted(tops).map(r=>r.subgrupo)))}
     </form>
     <div class="dfoot">
       <div>${drawer.id && !ro ? (drawer.confirmDel ? `<span class="err">${kids.length?`¿Eliminar también sus ${kids.length} subtareas?`:"¿Eliminar definitivamente?"}</span> <button class="btn danger" id="d-del-yes">Sí, eliminar</button> <button class="btn" id="d-del-no">No</button>` : `<button class="btn danger" id="d-del">Eliminar</button>`) : ""}</div>
@@ -767,7 +791,12 @@ function renderDrawer(){
   bindDrawerCommon();
   const form = $("#d-form");
   form.addEventListener("input", e => { const k = e.target.id && e.target.id.slice(2); if (!k) return; if (k === "nota") drawer.nota = e.target.value; else drawer.draft[k] = e.target.value; });
-  form.addEventListener("change", e => { const k = e.target.id && e.target.id.slice(2); if (k && k !== "nota") drawer.draft[k] = e.target.value; });
+  form.addEventListener("change", e => {
+    const k = e.target.id && e.target.id.slice(2); if (!k || k === "nota") return;
+    drawer.draft[k] = e.target.value;
+    if (k === "modulo"){ drawer.draft.grupo = ""; drawer.draft.subgrupo = ""; renderDrawer(); }
+    else if (k === "grupo"){ drawer.draft.subgrupo = ""; renderDrawer(); }
+  });
   const nr = $("#d-newresp"); if (nr) nr.onclick = e => { e.stopPropagation(); openRespPop(nr, code => { if (drawer && drawer.kind === "act"){ drawer.draft.sel = uniq(drawer.draft.sel.concat([code])); renderDrawer(); } }); };
   $("#d-resp").addEventListener("click", e => { const c = e.target.closest(".chip[data-code]"); if (!c || ro) return; const code = c.dataset.code, s = drawer.draft.sel; drawer.draft.sel = s.includes(code) ? s.filter(x=>x!==code) : s.concat([code]); c.setAttribute("aria-pressed", String(drawer.draft.sel.includes(code))); });
   const asb = $("#d-addsub"); if (asb) asb.onclick = () => newSub(drawer.id);
@@ -789,11 +818,11 @@ async function saveAct(){
   const d = drawer.draft, clean = k => String(d[k]||"").trim();
   const body = { modulo:clean("modulo"), grupo:clean("grupo"), subgrupo:clean("subgrupo"), actividad:clean("actividad"), estado:d.estado||"Pendiente", prioridad:d.prioridad||"", responsable:d.sel.join(" & "), inicio:d.inicio||null, fin:d.fin||null, notas:String(d.notas||"").trim(), padre: d.padre || null };
   if (!body.actividad){ drawer.error = "Escribe la descripción."; renderDrawer(); return; }
-  if (!body.padre && (!body.modulo || !body.grupo)){ drawer.error = "Indica al menos módulo y grupo."; renderDrawer(); return; }
+  if (!body.padre && (!body.modulo || !body.grupo || !body.subgrupo)){ drawer.error = "Elige la línea estratégica, la acción clave y la actividad."; renderDrawer(); return; }
   if (body.inicio && body.fin && body.fin < body.inicio){ drawer.error = "El cierre objetivo no puede ser anterior al inicio."; renderDrawer(); return; }
   const now = new Date().toISOString(), prev = drawer.id ? byId.get(drawer.id) : null, autor = me.nombre || me.usuario;
   const hist = (prev?.historial || []).slice(), push = texto => hist.push({ t: now, autor, texto });
-  if (!prev) push((body.padre ? "Subtarea creada" : "Actividad creada") + (body.estado!=="Pendiente" ? ` · estado ${body.estado}` : ""));
+  if (!prev) push((body.padre ? "Subtarea creada" : "Tarea creada") + (body.estado!=="Pendiente" ? ` · estado ${body.estado}` : ""));
   else {
     if ((prev.estado||"Pendiente") !== body.estado) push(`Estado: ${prev.estado||"Pendiente"} → ${body.estado}`);
     if ((prev.inicio||"") !== (body.inicio||"")) push(`Inicio: ${fmt(prev.inicio)} → ${fmt(body.inicio)}`);
@@ -814,10 +843,10 @@ async function saveAct(){
       const r2 = await sb.from("acciones").update({ modulo:body.modulo, grupo:body.grupo, subgrupo:body.subgrupo }).eq("padre", prev.id);
       if (r2.error) throw r2.error;
     }
-    if (!body.padre) await ensureCats(body.modulo, body.grupo);
+    if (!body.padre) await ensureCats(body.modulo, body.grupo, body.subgrupo);
     await loadAcciones(); refresh();
     const back = body.padre && !prev ? body.padre : null;
-    closeDrawer(); toast(prev ? "Cambios guardados" : (body.padre ? "Subtarea creada" : "Actividad creada"));
+    closeDrawer(); toast(prev ? "Cambios guardados" : (body.padre ? "Subtarea creada" : "Tarea creada"));
     if (back) openDrawer(back);
   } catch(e){ drawer.error = dbErr(e); renderDrawer(); }
 }
@@ -869,7 +898,7 @@ function openRespPop(anchor, onCreated, onCancel){
     <div class="pop-g rev"><div class="fld"><label for="pr-codigo">Código</label><input id="pr-codigo" maxlength="6" placeholder="EP" autocomplete="off" style="text-transform:uppercase"></div>
       <div class="fld"><label for="pr-nombre">Nombre</label><input id="pr-nombre" maxlength="80" autocomplete="off"></div></div>
     <div class="fld"><label for="pr-area">Área / departamento</label>${areaSelect("pr-area", "", "")}</div>
-    <div class="pop-n">El código es lo que se verá en las actividades.</div>
+    <div class="pop-n">El código es lo que se verá en las tareas.</div>
     <div class="err" id="pop-err"></div>
     <div class="pop-f"><span class="sp"></span><button type="button" class="btn small" id="pop-cancel">Cancelar</button><button type="submit" class="btn small primary" id="pop-save">Crear</button></div>
   </form>`, anchor);
@@ -937,8 +966,8 @@ function renderRespDrawer(){
       <div class="fld"><label for="r-nombre">Nombre</label><input id="r-nombre" value="${esc(d.nombre)}" ${dis}></div>
       <div class="fld full"><label for="r-area">Área / departamento</label>${areaSelect("r-area", d.area || "", dis)}</div>
       <div class="fld full"><label for="r-email">Email</label><input id="r-email" type="email" value="${esc(d.email)}" ${dis}></div>
-      <label class="check full"><input id="r-activo" type="checkbox" ${d.activo!==false?"checked":""} ${dis}> Activo (aparece al asignar actividades)</label>
-      ${isNew ? `<p class="muted full" style="font-size:13px;margin:0">El código es lo que se muestra en las actividades. No se puede cambiar después.</p>` : `<p class="muted full" style="font-size:13px;margin:0">Asignado en ${used} actividades o subtareas.${ro ? " Solo un administrador puede modificarlo." : ""}</p>`}
+      <label class="check full"><input id="r-activo" type="checkbox" ${d.activo!==false?"checked":""} ${dis}> Activo (aparece al asignar tareas)</label>
+      ${isNew ? `<p class="muted full" style="font-size:13px;margin:0">El código es lo que se muestra en las tareas. No se puede cambiar después.</p>` : `<p class="muted full" style="font-size:13px;margin:0">Asignado en ${used} tareas o subtareas.${ro ? " Solo un administrador puede modificarlo." : ""}</p>`}
     </form>
     <div class="dfoot">
       <div>${!isNew && !ro ? (used ? `<span class="muted" style="font-size:13px">Para retirarlo, desmarca «Activo».</span>` : drawer.confirmDel ? `<span class="err">¿Eliminar?</span> <button class="btn danger" id="d-del-yes">Sí, eliminar</button> <button class="btn" id="d-del-no">No</button>` : `<button class="btn danger" id="d-del">Eliminar</button>`) : ""}</div>
@@ -973,7 +1002,6 @@ async function saveResp(){
 }
 
 /* ---------- Líneas estratégicas, grupos y sub-grupos: crear, renombrar, ordenar ---------- */
-const SIN = { modulo:"Sin módulo", grupo:"Sin grupo", subgrupo:"Sin sub-grupo" };
 const raw = (lv, v) => v === SIN[lv] ? "" : (v || "");
 function inScope(r, x){
   if ((r.modulo||"") !== raw("modulo", x.m)) return false;
@@ -984,38 +1012,46 @@ function inScope(r, x){
 function namesAt(level, m, g){
   if (level === "modulo") return uniq(rows.map(r => r.modulo).concat(cats.filter(c => c.nivel === "modulo").map(c => c.modulo)));
   if (level === "grupo") return uniq(rows.filter(r => r.modulo === m).map(r => r.grupo).concat(cats.filter(c => c.nivel === "grupo" && c.modulo === m).map(c => c.grupo)));
-  return uniq(rows.filter(r => r.modulo === m && r.grupo === g).map(r => r.subgrupo));
+  return uniq(rows.filter(r => r.modulo === m && r.grupo === g).map(r => r.subgrupo).concat(cats.filter(c => c.nivel === "subgrupo" && c.modulo === m && c.grupo === g).map(c => c.subgrupo)));
 }
-async function ensureCats(m, g){
+/* Nombres en el orden en que se ven en la lista */
+function orderedNames(level, m, g){
+  const t = groupTree(rows.filter(isTop).map(r => ({ r })), true);
+  let list = level === "modulo" ? [...t.keys()] : level === "grupo" ? [...(t.get(m || SIN.modulo) || new Map()).keys()]
+    : [...((t.get(m || SIN.modulo) || new Map()).get(g || SIN.grupo) || new Map()).keys()];
+  return list.map(v => raw(level, v)).filter(Boolean);
+}
+async function ensureCats(m, g, s){
   if (catsMissing || !m) return;
   const ins = [];
-  if (!catRow("modulo", m)) ins.push(withPlan({ nivel:"modulo", modulo:m, grupo:"", orden: nextOrd("modulo") }));
-  if (g && !catRow("grupo", m, g)) ins.push(withPlan({ nivel:"grupo", modulo:m, grupo:g, orden: nextOrd("grupo", m) }));
+  if (!catRow("modulo", m)) ins.push(catObj("modulo", m, "", "", nextOrd("modulo")));
+  if (g && !catRow("grupo", m, g)) ins.push(catObj("grupo", m, g, "", nextOrd("grupo", m)));
+  if (g && s && catsV3() && !catRow("subgrupo", m, g, s)) ins.push(catObj("subgrupo", m, g, s, nextOrd("subgrupo", m, g)));
   if (!ins.length) return;
   try { await sb.from("categorias").upsert(ins, { onConflict: CONFLICT(), ignoreDuplicates:true }); await loadCats(); } catch(e){}
 }
 function closePop(){ pop = null; const r = $("#pop-root"); if (r) r.innerHTML = ""; }
+const LVTITLE = { modulo:"Línea estratégica", grupo:"Acción clave", subgrupo:"Actividad" };
 function openCatPop(x, anchor){
   closeMs(); closePop();
-  const isNew = x.mode === "new", M = raw("modulo", x.m), G = raw("grupo", x.g);
-  const cur = isNew ? "" : (x.level === "modulo" ? M : x.level === "grupo" ? G : raw("subgrupo", x.s));
-  const ordered = x.level !== "subgrupo";
-  const ord = !ordered ? null : isNew ? nextOrd(x.level, M) : catOrd(x.level, M, G);
+  const isNew = x.mode === "new", M = raw("modulo", x.m), G = raw("grupo", x.g), S = raw("subgrupo", x.s);
+  const cur = isNew ? "" : (x.level === "modulo" ? M : x.level === "grupo" ? G : S);
+  const ord = isNew ? nextOrd(x.level, M, G) : catOrd(x.level, M, G, S);
   const n = isNew ? 0 : rows.filter(r => inScope(r, x)).length;
-  const emptyCat = !isNew && x.level !== "subgrupo" && (n === 0 ? canWrite : isAdmin);
-  const title = isNew ? (x.level === "modulo" ? "Nueva línea estratégica" : `Nuevo grupo en ${M}`) : (x.level === "modulo" ? "Línea estratégica" : x.level === "grupo" ? "Grupo" : "Sub-grupo");
-  pop = { x, isNew, M, G, cur, ord, n };
+  const canDel = !isNew && canLevel(x.level);
+  const title = isNew ? (x.level === "modulo" ? "Nueva línea estratégica" : x.level === "grupo" ? `Nueva acción clave en ${M}` : `Nueva actividad en ${G}`) : LVTITLE[x.level];
+  pop = { x, isNew, M, G, S, cur, ord, n };
   let root = $("#pop-root"); if (!root){ root = document.createElement("div"); root.id = "pop-root"; document.body.appendChild(root); }
   root.innerHTML = `<form class="pop" id="pop" role="dialog" aria-labelledby="pop-t" novalidate>
     <div class="pop-t" id="pop-t">${esc(title)}</div>
-    <div class="pop-g ${ordered ? "" : "one"}">
+    <div class="pop-g">
       <div class="fld"><label for="pop-nombre">Nombre</label><input id="pop-nombre" value="${esc(cur)}" maxlength="120" autocomplete="off"></div>
-      ${ordered ? `<div class="fld"><label for="pop-orden">Orden</label><input id="pop-orden" type="number" min="1" step="1" inputmode="numeric" value="${ord ?? ""}"></div>` : ""}
+      <div class="fld"><label for="pop-orden">Orden</label><input id="pop-orden" type="number" min="1" step="1" inputmode="numeric" value="${ord ?? ""}"></div>
     </div>
-    <div class="pop-n" id="pop-n">${isNew ? (ordered ? "El orden decide su posición: 1 aparece primero." : "") : `Se aplica a ${n} ${n === 1 ? "actividad" : "actividades"}.${ordered ? " Orden 1 aparece primero." : ""}`}</div>
+    <div class="pop-n" id="pop-n">${isNew ? "El orden decide su posición: 1 aparece primero." : `Se aplica a ${n} ${n === 1 ? "tarea" : "tareas"}. Orden 1 aparece primero.`}</div>
     <div class="pop-w" id="pop-w" hidden></div>
     <div class="err" id="pop-err"></div>
-    <div class="pop-f">${emptyCat ? `<button type="button" class="btn link dangertxt" id="pop-del">Eliminar</button>` : "<span></span>"}<span class="sp"></span><button type="button" class="btn small" id="pop-cancel">Cancelar</button><button type="submit" class="btn small primary" id="pop-save">${isNew ? "Crear" : "Guardar"}</button></div>
+    <div class="pop-f">${canDel ? `<button type="button" class="btn link dangertxt" id="pop-del">Eliminar</button>` : "<span></span>"}<span class="sp"></span><button type="button" class="btn small" id="pop-cancel">Cancelar</button><button type="submit" class="btn small primary" id="pop-save">${isNew ? "Crear" : "Guardar"}</button></div>
   </form>`;
   const el = $("#pop"), r = anchor.getBoundingClientRect();
   const w = el.offsetWidth, h = el.offsetHeight;
@@ -1023,79 +1059,84 @@ function openCatPop(x, anchor){
   let top = r.bottom + 6; if (top + h > window.innerHeight - 8 && r.top - h - 6 > 8) top = r.top - h - 6;
   el.style.left = (left + window.scrollX) + "px"; el.style.top = (top + window.scrollY) + "px";
   const inp = $("#pop-nombre"), warn = $("#pop-w");
-  const check = () => {
+  inp.addEventListener("input", () => {
     const v = inp.value.trim(), exists = v && v !== cur && namesAt(x.level, M, G).includes(v);
     warn.hidden = !exists;
     warn.textContent = !exists ? "" : isNew ? "Ya existe uno con ese nombre." : "Ya existe uno con ese nombre. Si guardas, los dos quedarán unidos en uno solo.";
-  };
-  inp.addEventListener("input", check);
+  });
   el.addEventListener("submit", e => { e.preventDefault(); savePop(); });
   $("#pop-cancel").onclick = closePop;
   const del = $("#pop-del"); if (del) del.onclick = deletePop;
   inp.focus(); inp.select();
 }
 async function savePop(){
-  const { x, isNew, M, G, cur, ord } = pop;
-  const nombre = $("#pop-nombre").value.trim(), oEl = $("#pop-orden");
-  const ordTxt = oEl ? oEl.value.trim() : "", orden = ordTxt === "" ? null : Number(ordTxt);
+  const { x, isNew, M, G, S, cur, ord } = pop;
+  const nombre = $("#pop-nombre").value.trim(), ordTxt = $("#pop-orden").value.trim(), orden = ordTxt === "" ? null : Number(ordTxt);
   const err = m => { $("#pop-err").textContent = m; };
   if (!nombre) return err("Escribe un nombre.");
   if (orden !== null && (!Number.isInteger(orden) || orden < 1)) return err("El orden debe ser un número entero mayor que 0.");
+  if (x.level === "subgrupo" && !catsV3()) return err("Falta ejecutar niveles_roles.sql en Supabase para crear y ordenar actividades.");
   const btn = $("#pop-save"); btn.disabled = true;
+  const at = n => ({ m: x.level === "modulo" ? n : M, g: x.level === "grupo" ? n : G, s: x.level === "subgrupo" ? n : "" });
   try {
     if (isNew){
       if (namesAt(x.level, M, G).includes(nombre)){ btn.disabled = false; return err("Ya existe uno con ese nombre."); }
-      const row = withPlan({ nivel: x.level, modulo: x.level === "modulo" ? nombre : M, grupo: x.level === "grupo" ? nombre : "", orden: null });
-      const { error } = await sb.from("categorias").insert(row); if (error) throw error;
-      if (x.level === "grupo") delete st.col["m:"+(M || SIN.modulo)];
+      const k = at(nombre);
+      const { error } = await sb.from("categorias").insert(catObj(x.level, k.m, k.g, k.s, null)); if (error) throw error;
+      delete st.col["m:"+(M || SIN.modulo)]; delete st.col["g:"+(M || SIN.modulo)+"|"+(G || SIN.grupo)];
       await loadCats();
-      await reorder(x.level, M, nombre, orden ?? nextOrd(x.level, M));
+      await reorder(x.level, M, G, nombre, orden ?? nextOrd(x.level, M, G));
     } else {
-      if (nombre !== cur){ await renameCat(x, M, G, cur, nombre); await Promise.all([loadAcciones(), loadCats()]); }
-      if (x.level !== "subgrupo" && orden !== ord){
+      if (nombre !== cur){ await renameCat(x, M, G, S, cur, nombre); await Promise.all([loadAcciones(), loadCats()]); }
+      if (orden !== ord){
         if (orden === null){
-          const { error } = await sb.from("categorias").upsert(withPlan({ nivel: x.level, modulo: x.level === "modulo" ? nombre : M, grupo: x.level === "grupo" ? nombre : "", orden: null }), { onConflict: CONFLICT() });
+          const k = at(nombre);
+          const { error } = await sb.from("categorias").upsert(catObj(x.level, k.m, k.g, k.s, null), { onConflict: CONFLICT() });
           if (error) throw error;
-        } else await reorder(x.level, M, nombre, orden);
+        } else await reorder(x.level, M, G, nombre, orden);
       }
     }
     saveUi();
     await Promise.all([loadAcciones(), loadCats()]); refresh(); closePop();
-    toast(isNew ? (x.level === "modulo" ? "Línea estratégica creada" : "Grupo creado") : "Cambios guardados");
+    toast(isNew ? `${LVTITLE[x.level]} creada` : "Cambios guardados");
   } catch(e){ btn.disabled = false; err(dbErr(e)); }
 }
 /* Coloca «name» en la posición «orden» y renumera sus hermanos 1, 2, 3… */
-async function reorder(level, M, name, orden){
-  const t = groupTree(rows.filter(isTop).map(r => ({ r })), true);
-  let list = level === "modulo" ? [...t.keys()] : [...(t.get(M || SIN.modulo) || new Map()).keys()];
-  list = list.map(v => raw(level, v)).filter(v => v && v !== name);
+async function reorder(level, M, G, name, orden){
+  const list = orderedNames(level, M, G).filter(v => v !== name);
   list.splice(Math.max(0, Math.min(orden - 1, list.length)), 0, name);
-  const ups = list.map((v, i) => withPlan({ nivel: level, modulo: level === "modulo" ? v : M, grupo: level === "grupo" ? v : "", orden: i + 1 }))
-    .filter(u => catOrd(level, u.modulo, u.grupo) !== u.orden);
+  const ups = list.map((v, i) => catObj(level, level === "modulo" ? v : M, level === "grupo" ? v : G, level === "subgrupo" ? v : "", i + 1))
+    .filter(u => catOrd(level, u.modulo, u.grupo, u.subgrupo || "") !== u.orden);
   if (!ups.length) return;
   const { error } = await sb.from("categorias").upsert(ups, { onConflict: CONFLICT() });
   if (error) throw error;
 }
-async function renameCat(x, M, G, viejo, nuevo){
+async function renameCat(x, M, G, S, viejo, nuevo){
+  // 1) la estructura (categorías) primero, para que las tareas encuentren su sitio
+  const del = async id => { const r = await sb.from("categorias").delete().eq("id", id); if (r.error) throw r.error; };
+  const upd = async (id, v) => { const r = await sb.from("categorias").update(v).eq("id", id); if (r.error) throw r.error; };
+  if (!catsMissing){
+    if (x.level === "modulo"){
+      for (const c of cats.filter(c => c.modulo === M)){
+        if (catRow(c.nivel, nuevo, c.grupo, c.subgrupo || "")) await del(c.id); else await upd(c.id, { modulo: nuevo });
+      }
+    } else if (x.level === "grupo"){
+      for (const c of cats.filter(c => c.modulo === M && c.grupo === G && c.nivel !== "modulo")){
+        if (catRow(c.nivel, M, nuevo, c.subgrupo || "")) await del(c.id); else await upd(c.id, { grupo: nuevo });
+      }
+    } else {
+      const own = catRow("subgrupo", M, G, S);
+      if (own){ if (catRow("subgrupo", M, G, nuevo)) await del(own.id); else await upd(own.id, { subgrupo: nuevo }); }
+    }
+  }
+  // 2) las tareas y subtareas
   const stamp = { actualizado: new Date().toISOString(), actualizado_por: me.id };
   let q = sb.from("acciones").update(Object.assign({ [x.level]: nuevo }, stamp)).eq("modulo", M);
   if (!plansMissing) q = q.eq("plan_id", curPlan);
   if (x.level !== "modulo") q = q.eq("grupo", G);
-  if (x.level === "subgrupo") q = q.eq("subgrupo", raw("subgrupo", x.s));
+  if (x.level === "subgrupo") q = q.eq("subgrupo", S);
   const { error } = await q; if (error) throw error;
-  const del = async id => { const r = await sb.from("categorias").delete().eq("id", id); if (r.error) throw r.error; };
-  const upd = async (id, v) => { const r = await sb.from("categorias").update(v).eq("id", id); if (r.error) throw r.error; };
-  if (!catsMissing && x.level === "modulo"){
-    const own = catRow("modulo", M);
-    if (own){ if (catRow("modulo", nuevo)) await del(own.id); else await upd(own.id, { modulo: nuevo }); }
-    for (const c of cats.filter(c => c.nivel === "grupo" && c.modulo === M)){
-      if (catRow("grupo", nuevo, c.grupo)) await del(c.id); else await upd(c.id, { modulo: nuevo });
-    }
-  } else if (!catsMissing && x.level === "grupo"){
-    const own = catRow("grupo", M, G);
-    if (own){ if (catRow("grupo", M, nuevo)) await del(own.id); else await upd(own.id, { grupo: nuevo }); }
-  }
-  // filtros y desplegables siguen al nombre nuevo
+  // 3) filtros y desplegables siguen al nombre nuevo
   const k = x.level;
   st.f[k] = st.f[k].map(v => v === viejo ? nuevo : v);
   const shown = v => v || SIN[k];
@@ -1104,14 +1145,14 @@ async function renameCat(x, M, G, viejo, nuevo){
   if (st.col[oldKey]){ delete st.col[oldKey]; st.col[newKey] = true; }
 }
 async function deletePop(){
-  const { x, M, G, n } = pop, btn = $("#pop-del");
-  const what = x.level === "modulo" ? "la línea estratégica" : "el grupo";
-  const grupos = x.level === "modulo" ? cats.filter(c => c.nivel === "grupo" && c.modulo === M).length : 0;
-  // Primer clic: avisar de lo que se va a borrar. Segundo clic: borrar.
+  const { x, M, G, S, n } = pop, btn = $("#pop-del");
+  const what = { modulo:"la línea estratégica", grupo:"la acción clave", subgrupo:"la actividad" }[x.level];
+  const nG = x.level === "modulo" ? namesAt("grupo", M).length : 0;
+  const nS = x.level === "subgrupo" ? 0 : cats.filter(c => c.nivel === "subgrupo" && c.modulo === M && (x.level === "modulo" || c.grupo === G)).length;
   if (!btn.dataset.sure){
-    btn.dataset.sure = "1";
-    btn.textContent = "Sí, eliminar";
-    $("#pop-n").innerHTML = `<span class="late">Se eliminará ${what}${grupos ? ` con sus ${grupos} grupos` : ""}${n ? ` y sus <b>${n} ${n === 1 ? "actividad" : "actividades"}</b> (con sus subtareas e historial). No se puede deshacer.` : "."}</span> Pulsa «Sí, eliminar» para confirmar.`;
+    btn.dataset.sure = "1"; btn.textContent = "Sí, eliminar";
+    const partes = [nG ? `${nG} ${nG === 1 ? "acción clave" : "acciones clave"}` : "", nS ? `${nS} ${nS === 1 ? "actividad" : "actividades"}` : "", n ? `<b>${n} ${n === 1 ? "tarea" : "tareas"}</b> (con sus subtareas e historial)` : ""].filter(Boolean);
+    $("#pop-n").innerHTML = `<span class="late">Se eliminará ${what}${partes.length ? " con " + partes.join(", ") : ""}. No se puede deshacer.</span> Pulsa «Sí, eliminar» para confirmar.`;
     return;
   }
   btn.disabled = true;
@@ -1119,17 +1160,19 @@ async function deletePop(){
     if (n){
       let qa = sb.from("acciones").delete().eq("modulo", M);
       if (!plansMissing) qa = qa.eq("plan_id", curPlan);
-      if (x.level === "grupo") qa = qa.eq("grupo", G);
+      if (x.level !== "modulo") qa = qa.eq("grupo", G);
+      if (x.level === "subgrupo") qa = qa.eq("subgrupo", S);
       const ra = await qa; if (ra.error) throw ra.error;
     }
     let q = sb.from("categorias").delete().eq("modulo", M);
     if (!plansMissing) q = q.eq("plan_id", curPlan);
-    if (x.level === "grupo") q = q.eq("nivel", "grupo").eq("grupo", G);
+    if (x.level === "grupo") q = q.eq("grupo", G);
+    if (x.level === "subgrupo") q = q.eq("nivel", "subgrupo").eq("grupo", G).eq("subgrupo", S);
     const { error } = await q; if (error) throw error;
-    const k = x.level === "modulo" ? "modulo" : "grupo", viejo = x.level === "modulo" ? M : G;
-    st.f[k] = st.f[k].filter(v => v !== viejo); saveUi();
+    const viejo = x.level === "modulo" ? M : x.level === "grupo" ? G : S;
+    st.f[x.level] = st.f[x.level].filter(v => v !== viejo); saveUi();
     await Promise.all([loadAcciones(), loadCats()]); refresh(); closePop();
-    toast(x.level === "modulo" ? "Línea estratégica eliminada" : "Grupo eliminado");
+    toast(`${LVTITLE[x.level]} eliminada`);
   } catch(e){ btn.disabled = false; $("#pop-err").textContent = dbErr(e); }
 }
 document.addEventListener("pointerdown", e => { if (pop && !e.target.closest("#pop") && !e.target.closest("[data-ren],[data-newcat],#newline,.poptrig,#u-responsable")) closePop(); });
@@ -1151,7 +1194,8 @@ function renderUserDrawer(){
       <div class="fld"><label for="u-usuario">Usuario (para entrar)</label><input id="u-usuario" value="${esc(d.usuario)}" ${isNew?"":"disabled"} autocapitalize="none" spellcheck="false" placeholder="p. ej. jm"></div>
       <div class="fld"><label for="u-nombre">Nombre</label><input id="u-nombre" value="${esc(d.nombre)}"></div>
       <div class="fld"><label for="u-responsable">Responsable vinculado</label><select id="u-responsable">${respOpts}</select></div>
-      <div class="fld"><label for="u-rol">Rol</label><select id="u-rol" ${self?"disabled":""}><option value="usuario" ${d.rol==="usuario"?"selected":""}>Usuario</option><option value="admin" ${d.rol==="admin"?"selected":""}>Administrador</option></select></div>
+      <div class="fld"><label for="u-rol">Rol</label><select id="u-rol" ${self?"disabled":""}>${["admin","encargado","usuario"].map(r => `<option value="${r}" ${d.rol===r?"selected":""}>${ROLNAME[r]}</option>`).join("")}</select></div>
+      <p class="muted full" style="font-size:12.5px;margin:-4px 0 0"><b>Administrador:</b> todo, incluidos planes, líneas estratégicas y usuarios. <b>Encargado:</b> acciones clave, actividades, tareas y subtareas. <b>Usuario:</b> solo tareas y subtareas.</p>
       <label class="check full"><input id="u-activo" type="checkbox" ${d.activo?"checked":""} ${self?"disabled":""}> Activo (puede entrar en la app)</label>
       <div class="fld full"><label for="u-password">${isNew ? "Contraseña provisional" : "Nueva contraseña (déjala vacía para no cambiarla)"}</label>
         <div class="pwrow"><input id="u-password" type="text" value="${esc(d.password)}" autocomplete="new-password" spellcheck="false" placeholder="Mínimo 8 caracteres"><button type="button" class="btn" id="u-gen">Generar</button></div></div>
@@ -1244,10 +1288,10 @@ function renderHome(){
     const late = mias.filter(isOverdue), soon = mias.filter(r => r.fin && r.fin >= today && r.fin <= addDays(today, 7));
     const next = mias.slice().sort((a,b) => (a.fin||"9999").localeCompare(b.fin||"9999")).slice(0, 6);
     h += `<div class="mybox"><div class="mytiles">
-        <div class="tile"><b>${mias.length}</b><span>Mis acciones abiertas</span></div>
+        <div class="tile"><b>${mias.length}</b><span>Mis tareas abiertas</span></div>
         <div class="tile ${late.length?"bad":""}"><b>${late.length}</b><span>Vencidas</span></div>
         <div class="tile"><b>${soon.length}</b><span>Cierran en 7 días</span></div></div>
-      <div class="mynext"><div class="sect"><span>Próximos cierres</span></div>${next.length ? `<ul>${next.map(r => `<li><button class="mylink" data-goto="${esc(r.id)}" data-plan="${esc(r.plan_id)}"><span class="mono ${isOverdue(r)?"late":""}">${r.fin ? fmt(r.fin) : "sin fecha"}</span><span class="t">${esc(r.actividad)}</span><span class="pl">${esc(planOf(r.plan_id)?.nombre || "")}</span></button></li>`).join("")}</ul>` : `<p class="muted" style="margin:0;font-size:13px">No tienes acciones abiertas. Buen trabajo.</p>`}</div></div>`;
+      <div class="mynext"><div class="sect"><span>Próximos cierres</span></div>${next.length ? `<ul>${next.map(r => `<li><button class="mylink" data-goto="${esc(r.id)}" data-plan="${esc(r.plan_id)}"><span class="mono ${isOverdue(r)?"late":""}">${r.fin ? fmt(r.fin) : "sin fecha"}</span><span class="t">${esc(r.actividad)}</span><span class="pl">${esc(planOf(r.plan_id)?.nombre || "")}</span></button></li>`).join("")}</ul>` : `<p class="muted" style="margin:0;font-size:13px">No tienes tareas abiertas. Buen trabajo.</p>`}</div></div>`;
   }
   h += `<div class="plans-head"><h2>Planes por periodo</h2><span class="muted">${planes.length} ${planes.length === 1 ? "plan" : "planes"}</span></div><div class="plans">`;
   for (const p of list){
@@ -1259,14 +1303,14 @@ function renderHome(){
       ${p.descripcion ? `<p class="desc">${esc(p.descripcion)}</p>` : ""}
       <div class="meters">
         <div class="meter"><div class="ml"><span>Tiempo transcurrido</span><b>${s.tiempo === null ? "—" : s.tiempo + "%"}</b></div><div class="mbar time"><i style="width:${s.tiempo ?? 0}%"></i></div></div>
-        <div class="meter"><div class="ml"><span>Acciones cerradas</span><b>${s.pct}%</b></div><div class="mbar done"><i style="width:${s.pct}%"></i></div></div>
+        <div class="meter"><div class="ml"><span>Tareas cerradas</span><b>${s.pct}%</b></div><div class="mbar done"><i style="width:${s.pct}%"></i></div></div>
       </div>
-      <div class="pnums"><span><b>${s.per.length}</b> líneas</span><span><b>${s.grupos}</b> grupos</span><span><b>${s.n}</b> acciones</span><span><b>${s.curso}</b> en curso</span>${s.late ? `<span class="late"><b>${s.late}</b> vencidas</span>` : ""}</div>
+      <div class="pnums"><span><b>${s.per.length}</b> líneas</span><span><b>${s.grupos}</b> acciones clave</span><span><b>${s.n}</b> tareas</span><span><b>${s.curso}</b> en curso</span>${s.late ? `<span class="late"><b>${s.late}</b> vencidas</span>` : ""}</div>
       ${s.per.length ? `<ul class="plines">${s.per.slice(0,4).map(x => `<li><span class="ln">${esc(x.l)}</span><span class="minibar"><i style="width:${x.n ? Math.round(x.c*100/x.n) : 0}%"></i></span><span class="mono">${x.c}/${x.n}</span></li>`).join("")}${more > 0 ? `<li class="muted">y ${more} ${more === 1 ? "línea" : "líneas"} más</li>` : ""}</ul>` : `<p class="muted" style="font-size:13px;margin:0">Sin líneas estratégicas todavía.</p>`}
       <div class="plan-foot">Abrir plan <span aria-hidden="true">→</span></div>
     </article>`;
   }
-  if (isAdmin) h += `<button class="plan plan-new" data-newplan><span class="plus" aria-hidden="true">+</span><b>Nuevo plan estratégico</b><span class="muted">Define el periodo y empieza a construir sus líneas, grupos y acciones.</span></button>`;
+  if (isAdmin) h += `<button class="plan plan-new" data-newplan><span class="plus" aria-hidden="true">+</span><b>Nuevo plan estratégico</b><span class="muted">Define el periodo y empieza a construir sus líneas, acciones clave y tareas.</span></button>`;
   if (!planes.length && !isAdmin) h += `<div class="note">Aún no hay planes. Un administrador puede crear el primero.</div>`;
   return h + `</div></section>`;
 }
@@ -1307,8 +1351,8 @@ function renderPlanDrawer(){
       <div class="fld"><label for="p-fin">Fin del periodo</label><input id="p-fin" type="date" value="${esc(d.fin||"")}"></div>
       <div class="fld full"><label for="p-estado">Estado</label><select id="p-estado">${Object.entries(ESTPLAN).map(([k,v]) => `<option value="${k}" ${d.estado===k?"selected":""}>${v}</option>`).join("")}</select></div>
       <div class="fld full"><label for="p-descripcion">Descripción / objetivo general</label><textarea id="p-descripcion" rows="3">${esc(d.descripcion)}</textarea></div>
-      ${isNew && otros.length ? `<div class="fld full"><label for="p-copiar">Partir de la estructura de otro plan</label><select id="p-copiar"><option value="">No, empezar en blanco</option>${otros.map(p => `<option value="${esc(p.id)}">${esc(p.nombre)}</option>`).join("")}</select><span class="muted" style="font-size:12px">Copia sus líneas estratégicas y grupos, con su orden. Las acciones no se copian.</span></div>` : ""}
-      ${!isNew ? `<p class="muted full" style="font-size:13px;margin:0">Este plan tiene ${n} ${n === 1 ? "acción" : "acciones"}.</p>` : ""}
+      ${isNew && otros.length ? `<div class="fld full"><label for="p-copiar">Partir de la estructura de otro plan</label><select id="p-copiar"><option value="">No, empezar en blanco</option>${otros.map(p => `<option value="${esc(p.id)}">${esc(p.nombre)}</option>`).join("")}</select><span class="muted" style="font-size:12px">Copia sus líneas estratégicas, acciones clave y actividades, con su orden. Las tareas no se copian.</span></div>` : ""}
+      ${!isNew ? `<p class="muted full" style="font-size:13px;margin:0">Este plan tiene ${n} ${n === 1 ? "tarea" : "tareas"}.</p>` : ""}
     </form>
     <div class="dfoot">
       <div>${!isNew ? (n ? `<span class="muted" style="font-size:13px">Para retirarlo, márcalo como «Cerrado».</span>` : drawer.confirmDel ? `<span class="err">¿Eliminar el plan?</span> <button class="btn danger" id="d-del-yes">Sí, eliminar</button> <button class="btn" id="d-del-no">No</button>` : `<button class="btn danger" id="d-del">Eliminar</button>`) : ""}</div>
@@ -1337,7 +1381,7 @@ async function savePlan(){
       const { data, error } = await sb.from("planes").insert(body).select("id"); if (error) throw error;
       id = data[0].id;
       if (d.copiar){
-        const src = allCats.filter(c => c.plan_id === d.copiar).map(c => ({ plan_id: id, nivel: c.nivel, modulo: c.modulo, grupo: c.grupo, orden: c.orden }));
+        const src = allCats.filter(c => c.plan_id === d.copiar).map(c => (Object.assign({ plan_id: id, nivel: c.nivel, modulo: c.modulo, grupo: c.grupo, orden: c.orden }, catsV3() ? { subgrupo: c.subgrupo || "" } : {})));
         if (src.length){ const r = await sb.from("categorias").insert(src); if (r.error) throw r.error; }
       }
     } else {
