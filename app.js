@@ -3,7 +3,7 @@
  */
 (() => {
 "use strict";
-const APP_VERSION = "01.11-a";
+const APP_VERSION = "01.11-b";
 let CFG = window.APP_CONFIG || {};
 const ESTADOS = ["Pendiente","En curso","Standby","Cerrada"];
 const PRIOS = ["Alta","Media","Baja"];
@@ -243,7 +243,8 @@ async function logout(){ if (channel){ sb.removeChannel(channel); channel = null
 function showApp(){
   $("#gate").hidden = true; $("#app").hidden = false;
   $("#me").innerHTML = me ? `<span><b>${esc(me.nombre || me.usuario)}</b> · ${esc(me.usuario)}</span><span class="role">${ROLNAME[me.rol] || me.rol}</span>
-    <button class="btn" id="me-guide">Guía</button><button class="btn" id="me-pass">Cambiar contraseña</button><button class="btn" id="me-out">Salir</button>` : "";
+    <button class="btn" id="me-guide">Guía</button><button class="btn" id="me-pass">Cambiar contraseña</button><button class="btn" id="me-out">Salir</button>
+    <span class="ver">Versión ${APP_VERSION}</span>` : "";
   const mp = $("#me-pass"); if (mp) mp.onclick = () => showChangePassword(false);
   const mg = $("#me-guide"); if (mg) mg.onclick = openGuide;
   const mo = $("#me-out"); if (mo) mo.onclick = logout;
