@@ -372,6 +372,42 @@ header.top .wrap{display:flex;flex-wrap:wrap;gap:10px 20px;align-items:flex-end;
 .pwrow{display:flex;gap:6px}
 .pwrow input{flex:1}
 .role-admin{--c:var(--accent)} .role-encargado{--c:var(--st-curso)} .role-usuario{--c:var(--st-pend)}
+/* --- Guía y permisos --- */
+.drawer.wide{width:min(760px,100%)}
+.guide .lead{margin:0 0 12px;font-size:15px;max-width:62ch}
+.niveles{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.nv{display:grid;grid-template-columns:34px minmax(0,1fr);gap:10px;align-items:start;margin-left:calc(var(--i) * 22px);padding:10px 12px;border:1px solid var(--line);border-left:4px solid var(--nc);border-radius:var(--r);background:color-mix(in srgb,var(--nc) 7%,var(--surface))}
+.nv1{--nc:var(--accent)} .nv2{--nc:var(--hi)} .nv3{--nc:var(--st-curso)} .nv4{--nc:var(--st-ok)} .nv5{--nc:var(--st-pend)}
+.nv-n{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font-family:var(--f-display);font-weight:700;font-size:16px;background:var(--nc,var(--accent));color:#fff}
+.nv-h{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+.nv-h b{font-family:var(--f-display);font-size:18px}
+.nv-ej{font-family:var(--f-mono);font-size:12px;color:var(--muted)}
+.nv p{margin:2px 0 4px;font-size:13.5px}
+.nv-q{font-size:12px;color:var(--muted)}
+@media (max-width:520px){.nv{margin-left:calc(var(--i) * 10px)}}
+.ejemplo{margin-top:14px;padding:10px 12px;border:1px dashed var(--line);border-radius:var(--r)}
+.ej-path{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-top:6px;font-size:14px}
+.ej-path span{display:flex;flex-direction:column;line-height:1.2}
+.ej-path small{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.ej-path i{font-style:normal;color:var(--muted);font-size:18px}
+.estados{display:flex;flex-wrap:wrap;gap:6px}
+.st-vencida{--c:var(--danger)}
+.howto{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:14px}
+.perm .pc{text-align:center;width:120px}
+.perm td:first-child{font-size:13.5px}
+.pok{color:var(--st-ok);font-weight:700;font-size:16px}
+.pno{color:var(--muted)}
+.permbox{margin:0 0 14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:8px 12px}
+.permbox summary,.homeguide summary{cursor:pointer;font-family:var(--f-display);font-weight:600;font-size:16px;padding:4px 0}
+.permbox .tscroll{border:0;margin-top:6px}
+.homeguide{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 16px 14px}
+.hg-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 12px}
+.hg-step{display:grid;grid-template-columns:auto auto;grid-template-rows:auto auto;column-gap:8px;align-items:center;padding:8px 12px;border-radius:8px;background:var(--surface-2)}
+.hg-step .nv-n{grid-row:1/3;width:26px;height:26px;font-size:14px}
+.hg-step:nth-of-type(1) .nv-n{background:var(--accent)} .hg-step:nth-of-type(2) .nv-n{background:var(--hi)} .hg-step:nth-of-type(3) .nv-n{background:var(--st-curso)} .hg-step:nth-of-type(4) .nv-n{background:var(--st-ok)} .hg-step:nth-of-type(5) .nv-n{background:var(--st-pend)}
+.hg-step b{font-size:14px} .hg-step .muted{font-size:12px}
+.hg-arr{color:var(--muted);font-size:20px}
+@media (max-width:640px){.hg-arr{display:none}.hg-row{display:grid;grid-template-columns:1fr 1fr}}
 .badge{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:999px;background:color-mix(in srgb,var(--c) 16%,var(--surface));border:1px solid color-mix(in srgb,var(--c) 45%,transparent)}
 .infobox{font-size:13px;padding:10px 12px;border-radius:var(--r);background:color-mix(in srgb,var(--hi) 14%,var(--surface));border:1px solid color-mix(in srgb,var(--hi) 45%,transparent)}
 .okbox{font-size:13px;padding:10px 12px;border-radius:var(--r);background:color-mix(in srgb,var(--st-ok) 14%,var(--surface));border:1px solid color-mix(in srgb,var(--st-ok) 45%,transparent)}
@@ -392,7 +428,7 @@ header.top .wrap{display:flex;flex-wrap:wrap;gap:10px 20px;align-items:flex-end;
     <button class="back" id="back" hidden><span aria-hidden="true">←</span> Todos los planes</button>
     <div class="eyebrow" id="h-eyebrow">Almesa · Dirección estratégica</div>
     <h1 id="h-title">Planes estratégicos</h1>
-    <p class="hsub" id="h-sub" hidden>Cada plan agrupa sus líneas estratégicas, grupos y acciones para un periodo. Elige uno para trabajar en él.</p>
+    <p class="hsub" id="h-sub" hidden>Cada plan agrupa, para un periodo, sus líneas estratégicas, acciones clave, actividades y tareas. Elige uno para trabajar en él.</p>
   </div>
   <div class="me" id="me"></div>
 </div></header>
@@ -436,7 +472,7 @@ header.top .wrap{display:flex;flex-wrap:wrap;gap:10px 20px;align-items:flex-end;
 <div class="toast" id="toast" hidden></div>
 
 <script src="supabase.js?v=2.45.4"></script>
-<script src="config.js?v=31.10-a"></script>
-<script src="app.js?v=31.10-a"></script>
+<script src="config.js?v=01.11-a"></script>
+<script src="app.js?v=01.11-a"></script>
 </body>
 </html>

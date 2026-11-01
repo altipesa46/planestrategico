@@ -3,7 +3,7 @@
  */
 (() => {
 "use strict";
-const APP_VERSION = "31.10-a";
+const APP_VERSION = "01.11-a";
 let CFG = window.APP_CONFIG || {};
 const ESTADOS = ["Pendiente","En curso","Standby","Cerrada"];
 const PRIOS = ["Alta","Media","Baja"];
@@ -243,8 +243,9 @@ async function logout(){ if (channel){ sb.removeChannel(channel); channel = null
 function showApp(){
   $("#gate").hidden = true; $("#app").hidden = false;
   $("#me").innerHTML = me ? `<span><b>${esc(me.nombre || me.usuario)}</b> · ${esc(me.usuario)}</span><span class="role">${ROLNAME[me.rol] || me.rol}</span>
-    <button class="btn" id="me-pass">Cambiar contraseña</button><button class="btn" id="me-out">Salir</button>` : "";
+    <button class="btn" id="me-guide">Guía</button><button class="btn" id="me-pass">Cambiar contraseña</button><button class="btn" id="me-out">Salir</button>` : "";
   const mp = $("#me-pass"); if (mp) mp.onclick = () => showChangePassword(false);
+  const mg = $("#me-guide"); if (mg) mg.onclick = openGuide;
   const mo = $("#me-out"); if (mo) mo.onclick = logout;
   $("#tab-users").hidden = !isAdmin;
   if (!isAdmin && st.view === "usuarios") st.view = "lista";
@@ -645,6 +646,7 @@ function renderResp(){
 function renderUsers(){
   if (!isAdmin) return `<div class="empty"><h2>Sin acceso</h2><p>Solo los administradores pueden gestionar usuarios.</p></div>`;
   let h = `<div class="rhead"><h2>Usuarios</h2><button class="btn primary" data-newuser>+ Nuevo usuario</button></div>`;
+  h += `<details class="permbox" open><summary>Qué puede hacer cada rol</summary>${permMatrixHtml()}</details>`;
   if (usuariosErr) h += `<div class="note" style="margin-bottom:12px;color:var(--danger)">${esc(usuariosErr)}</div>`;
   if (!usuarios) return h + `<div class="note">Cargando usuarios…</div>`;
   if (!usuarios.length) return h + `<div class="note">No hay usuarios todavía.</div>`;
@@ -685,6 +687,7 @@ function bindView(){
     const as = t.closest("[data-addsub]"); if (as){ e.stopPropagation(); newSub(as.dataset.addsub); return; }
     const cal = t.closest("[data-cal]");
     if (cal){ const k = +cal.dataset.cal; if (k===0) st.cal = today.slice(0,7); else { const [y,m] = st.cal.split("-").map(Number); const d = new Date(y, m-1+k, 1); st.cal = d.getFullYear()+"-"+pad(d.getMonth()+1); } saveUi(); renderView(); return; }
+    if (t.closest("[data-guide]")){ openGuide(); return; }
     const ep = t.closest("[data-editplan]"); if (ep){ e.stopPropagation(); openPlan(ep.dataset.editplan); return; }
     if (t.closest("[data-newplan]")){ openPlan(null); return; }
     const gt = t.closest("[data-goto]"); if (gt){ const id = gt.dataset.goto; enterPlan(gt.dataset.plan, () => openDrawer(id)); return; }
@@ -747,6 +750,7 @@ function renderDrawer(){
   if (drawer.kind === "resp") return renderRespDrawer();
   if (drawer.kind === "user") return renderUserDrawer();
   if (drawer.kind === "plan") return renderPlanDrawer();
+  if (drawer.kind === "guia") return renderGuideDrawer();
   const d = drawer.draft, ro = !canWrite, isSub = !!d.padre, parent = isSub ? byId.get(d.padre) : null;
   const dis = ro ? "disabled" : "";
   // Ubicación de la tarea: fija si se crea desde una actividad o si el rol no permite moverla
@@ -1293,6 +1297,7 @@ function renderHome(){
         <div class="tile"><b>${soon.length}</b><span>Cierran en 7 días</span></div></div>
       <div class="mynext"><div class="sect"><span>Próximos cierres</span></div>${next.length ? `<ul>${next.map(r => `<li><button class="mylink" data-goto="${esc(r.id)}" data-plan="${esc(r.plan_id)}"><span class="mono ${isOverdue(r)?"late":""}">${r.fin ? fmt(r.fin) : "sin fecha"}</span><span class="t">${esc(r.actividad)}</span><span class="pl">${esc(planOf(r.plan_id)?.nombre || "")}</span></button></li>`).join("")}</ul>` : `<p class="muted" style="margin:0;font-size:13px">No tienes tareas abiertas. Buen trabajo.</p>`}</div></div>`;
   }
+  h += homeLevelsHtml();
   h += `<div class="plans-head"><h2>Planes por periodo</h2><span class="muted">${planes.length} ${planes.length === 1 ? "plan" : "planes"}</span></div><div class="plans">`;
   for (const p of list){
     const s = planStats(p), more = s.per.length - 4;
@@ -1392,6 +1397,74 @@ async function savePlan(){
     if (isNew){ toast("Plan creado"); enterPlan(id); } else { render(); toast("Plan actualizado"); }
   } catch(e){ drawer.error = dbErr(e); renderDrawer(); }
 }
+
+/* ---------- Guía: niveles y permisos ---------- */
+const NIVELES = [
+  { n:1, nombre:"Línea estratégica", ej:"Crecimiento en ventas", desc:"Gran objetivo del plan para su periodo. Marca hacia dónde va la empresa.", quien:"Administrador" },
+  { n:2, nombre:"Acción clave", ej:"On Line", desc:"Palanca concreta con la que se avanza en una línea estratégica.", quien:"Administrador y Encargado" },
+  { n:3, nombre:"Actividad", ej:"Amazon", desc:"Frente de trabajo dentro de una acción clave. Agrupa las tareas relacionadas.", quien:"Administrador y Encargado" },
+  { n:4, nombre:"Tarea", ej:"Diagnóstico Amazon", desc:"Trabajo concreto que se sigue en el día a día: responsable, estado, prioridad, fechas y notas.", quien:"Todos" },
+  { n:5, nombre:"Subtarea", ej:"Revisar las fichas de producto", desc:"Paso de una tarea, con su propio responsable y fechas.", quien:"Todos" }
+];
+/* Qué puede hacer cada rol: [texto, admin, encargado, usuario] */
+const PERMISOS = [
+  ["Ver todos los planes, tareas, calendario y cronograma", 1, 1, 1],
+  ["Crear, editar y eliminar tareas y subtareas", 1, 1, 1],
+  ["Mover una tarea a otra actividad", 1, 1, 0],
+  ["Crear, renombrar, ordenar y eliminar actividades", 1, 1, 0],
+  ["Crear, renombrar, ordenar y eliminar acciones clave", 1, 1, 0],
+  ["Crear, renombrar, ordenar y eliminar líneas estratégicas", 1, 0, 0],
+  ["Crear, editar y cerrar planes estratégicos", 1, 0, 0],
+  ["Dar de alta responsables y áreas", 1, 1, 1],
+  ["Modificar o eliminar responsables y áreas", 1, 0, 0],
+  ["Crear usuarios, asignar roles y cambiar contraseñas", 1, 0, 0]
+];
+function permMatrixHtml(){
+  const ok = v => v ? `<span class="pok" aria-label="Sí">✓</span>` : `<span class="pno" aria-label="No">—</span>`;
+  return `<div class="tscroll"><table class="rt perm"><thead><tr><th>Acción</th>${["admin","encargado","usuario"].map(r => `<th class="pc"><span class="badge role-${r}">${ROLNAME[r]}</span></th>`).join("")}</tr></thead>
+    <tbody>${PERMISOS.map(p => `<tr><td>${esc(p[0])}</td><td class="pc">${ok(p[1])}</td><td class="pc">${ok(p[2])}</td><td class="pc">${ok(p[3])}</td></tr>`).join("")}</tbody></table></div>`;
+}
+function levelsHtml(){
+  return `<ol class="niveles">${NIVELES.map(l => `<li class="nv nv${l.n}" style="--i:${l.n - 1}">
+      <span class="nv-n">${l.n}</span>
+      <div class="nv-b"><div class="nv-h"><b>${l.nombre}</b><span class="nv-ej">p. ej. ${esc(l.ej)}</span></div>
+        <p>${esc(l.desc)}</p><span class="nv-q">Lo gestiona: ${esc(l.quien)}</span></div>
+    </li>`).join("")}</ol>`;
+}
+function homeLevelsHtml(){
+  const k = "home-guia", closed = store.get(k, false);
+  return `<details class="homeguide" ${closed ? "" : "open"} data-store="${k}"><summary>Cómo se organiza un plan</summary>
+    <div class="hg-row">${NIVELES.map((l, i) => `<div class="hg-step"><span class="nv-n">${l.n}</span><b>${l.nombre}</b><span class="muted">${esc(l.ej)}</span></div>${i < NIVELES.length - 1 ? `<span class="hg-arr" aria-hidden="true">›</span>` : ""}`).join("")}</div>
+    <button class="btn small" data-guide>Ver la guía completa</button></details>`;
+}
+function openGuide(){ drawer = { kind:"guia", draft:{}, error:"" }; renderDrawer(); }
+function renderGuideDrawer(){
+  $("#drawer-root").innerHTML = `<div class="scrim" id="scrim"></div>
+  <aside class="drawer wide" role="dialog" aria-modal="true" aria-labelledby="d-title">
+    <div class="dhead"><h2 id="d-title">Cómo funciona el seguimiento del plan</h2><button class="btn" id="d-close" aria-label="Cerrar">✕</button></div>
+    <form class="dbody guide" id="d-form">
+      <div class="full">
+        <p class="lead">Cada <b>plan estratégico</b> cubre un periodo (por ejemplo 2026–2028) y se ordena en cinco niveles, de lo más general a lo más concreto. Cada nivel cuelga del anterior, como los peldaños de una escalera.</p>
+        ${levelsHtml()}
+        <div class="ejemplo"><span class="lbl">Ejemplo completo</span><div class="ej-path">${NIVELES.map(l => `<span><small>${l.nombre}</small>${esc(l.ej)}</span>`).join(`<i aria-hidden="true">›</i>`)}</div></div>
+      </div>
+      <div class="full"><div class="sect"><span>Estados de una tarea</span></div>
+        <div class="estados">${ESTADOS.map(e => `<span class="pill ${stClass(e)}">${e}</span>`).join("")}<span class="pill st-vencida">Vencida</span></div>
+        <p class="muted" style="font-size:13px;margin:6px 0 0">Una tarea está <b>vencida</b> cuando pasa su fecha objetivo de cierre sin estar cerrada. Las líneas, acciones clave y actividades muestran cuántas tareas tienen en curso, cerradas y vencidas.</p></div>
+      <div class="full"><div class="sect"><span>Qué puede hacer cada rol</span></div>${permMatrixHtml()}</div>
+      <div class="full"><div class="sect"><span>Cómo se trabaja</span></div>
+        <ul class="howto">
+          <li>Para añadir algo, hazlo <b>desde la fila donde va</b>: «+ Tarea» en una actividad, «+ Subtarea» en una tarea… Los niveles superiores se rellenan solos.</li>
+          <li>El <b>lápiz</b> junto a una línea, acción clave o actividad sirve para renombrarla, cambiar su orden o eliminarla.</li>
+          <li>Al abrir una tarea puedes cambiar su estado, fechas y responsables, y dejar una <b>nota de seguimiento</b>. Todo queda en su historial.</li>
+          <li>Los <b>filtros</b> de arriba permiten ver solo lo que interesa: por responsable, estado, fechas… «Mis tareas» muestra las tuyas.</li>
+        </ul></div>
+    </form>
+    <div class="dfoot"><div></div><div class="r"><button class="btn primary" id="d-cancel">Entendido</button></div></div>
+  </aside>`;
+  bindDrawerCommon();
+}
+document.addEventListener("toggle", e => { const d = e.target; if (d.matches && d.matches("details[data-store]")) store.set(d.dataset.store, !d.open); }, true);
 
 /* ---------- arranque ---------- */
 /* Acepta la URL del proyecto escrita de cualquier forma habitual y la deja en https://REF.supabase.co */
